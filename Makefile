@@ -12,8 +12,8 @@ serial mpi:
 
 clean:
 	$(MAKE) $(MFLAGS) -C Obj-serial clean
+	$(MAKE) $(MFLAGS) -C Obj-mpi clean
 	$(MAKE) $(MFLAGS) -C examples clean
 
 check: serial
 	$(MAKE) $(MFLAGS) -C examples check
-

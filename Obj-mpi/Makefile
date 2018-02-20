@@ -1,11 +1,11 @@
 # -*- Makefile -*-
 SHELL=/bin/sh
-CC=mpicc
-CFLAGS=-Wall -g -O3 -ffast-math -fomit-frame-pointer
+CC=mpic++
+CFLAGS=-Wall -g -O3 -ffast-math -fomit-frame-pointer -fopenmp
 LDLIBS=-lm
 
 # list of source files
-SRC=ljmd.c
+SRC=ljmd-mpi.c timers.h
 VPATH=../src
 OBJ=$(SRC:%.c=%.o)
 
@@ -21,6 +21,10 @@ clean:
 # compilation pattern rule for objects
 %.o: %.c
 	$(CC) -c $(CFLAGS) $<
+%.gch: %.h
+	$(CC) -c $(CFLAGS) $<
+
 
 # dependencies
-ljmd.o: ljmd.c
+timers.gch: timers.h
+ljmd.o: ljmd.c timers.h

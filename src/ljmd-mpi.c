@@ -104,6 +104,12 @@ static void force(mdsys_t *sys)
     azzero(sys->fz,sys->natoms);
 
     for(i=0; i < (sys->natoms); ++i) {
+        double fx = sys->fx[i];
+        double fy = sys->fy[i];
+        double fz = sys->fz[i];
+        double epot = sys->epot;
+
+        #pragma omp parallel for reduction(+:fx, fy, fz, epot)
         for(j=0; j < (sys->natoms); ++j) {
 
             /* particles have no interactions with themselves */
@@ -119,15 +125,17 @@ static void force(mdsys_t *sys)
             if (r < sys->rcut) {
                 ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r
                                          +6*pow(sys->sigma/r,6.0)/r);
-
-                sys->epot += 0.5*4.0*sys->epsilon*(pow(sys->sigma/r,12.0)
+                epot += 0.5*4.0*sys->epsilon*(pow(sys->sigma/r,12.0)
                                                -pow(sys->sigma/r,6.0));
-
-                sys->fx[i] += rx/r*ffac;
-                sys->fy[i] += ry/r*ffac;
-                sys->fz[i] += rz/r*ffac;
+                fx += rx/r*ffac;
+                fy += ry/r*ffac;
+                fz += rz/r*ffac;
             }
         }
+        sys->fx[i] = fx;
+        sys->fy[i] = fy;
+        sys->fz[i] = fz;
+        sys->epot = epot;
     }
 }
 
@@ -137,7 +145,6 @@ static void velverlet(mdsys_t *sys)
     int i;
 
     /* first part: propagate velocities by half and positions by full step */
-    timer_start("Velocities");
     for (i=0; i<sys->natoms; ++i) {
         sys->vx[i] += 0.5*sys->dt / mvsq2e * sys->fx[i] / sys->mass;
         sys->vy[i] += 0.5*sys->dt / mvsq2e * sys->fy[i] / sys->mass;
@@ -146,21 +153,17 @@ static void velverlet(mdsys_t *sys)
         sys->ry[i] += sys->dt*sys->vy[i];
         sys->rz[i] += sys->dt*sys->vz[i];
     }
-    timer_pause("Velocities");
 
     /* compute forces and potential energy */
-    timer_start("Forces");
     force(sys);
-    timer_pause("Forces");
 
     /* second part: propagate velocities by another half step */
-    timer_start("Velocities");
     for (i=0; i<sys->natoms; ++i) {
         sys->vx[i] += 0.5*sys->dt / mvsq2e * sys->fx[i] / sys->mass;
         sys->vy[i] += 0.5*sys->dt / mvsq2e * sys->fy[i] / sys->mass;
         sys->vz[i] += 0.5*sys->dt / mvsq2e * sys->fz[i] / sys->mass;
     }
-    timer_pause("Velocities");
+
 }
 
 /* append data to output. */

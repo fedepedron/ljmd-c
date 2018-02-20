@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include "timers.h"
+#include "ncdf.h"
 
 
 /* generic file- or pathname buffer length */
@@ -146,7 +147,7 @@ void make_ngb_list(mdsys_t *sys)
 {
   for(int i=0; i < (sys->natoms); i++) {
     int tmp_ngb = 0;
-    
+
     #pragma omp parallel for
     for(int j=0; j < (sys->natoms); j++) {
       if (i==j) continue;
@@ -198,16 +199,16 @@ static void velverlet(mdsys_t *sys)
 
 
 /* append data to output. */
-static void output(mdsys_t *sys, FILE *erg, FILE *traj)
+static void output(mdsys_t *sys, FILE *erg, FILE *traj, char* trajfile)
 {
-    int i;
-
     printf("% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp, sys->ekin, sys->epot, sys->ekin+sys->epot);
     fprintf(erg,"% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp, sys->ekin, sys->epot, sys->ekin+sys->epot);
-    fprintf(traj,"%d\n nfi=%d etot=%20.8f\n", sys->natoms, sys->nfi, sys->ekin+sys->epot);
-    for (i=0; i<sys->natoms; ++i) {
-        fprintf(traj, "Ar  %20.8f %20.8f %20.8f\n", sys->rx[i], sys->ry[i], sys->rz[i]);
-    }
+    // Print trajectory using NetCDF format.
+    write_to_netcdf(sys->rx, sys->ry, sys->rz, sys->natoms, trajfile);
+    //fprintf(traj,"%d\n nfi=%d etot=%20.8f\n", sys->natoms, sys->nfi, sys->ekin+sys->epot);
+    //for (int i=0; i<sys->natoms; ++i) {
+    //    fprintf(traj, "Ar  %20.8f %20.8f %20.8f\n", sys->rx[i], sys->ry[i], sys->rz[i]);
+    //}
 }
 
 
@@ -292,7 +293,7 @@ int main(int argc, char **argv)
 
     printf("Starting simulation with %d atoms for %d steps.\n",sys.natoms, sys.nsteps);
     printf("     NFI            TEMP            EKIN                 EPOT              ETOT\n");
-    output(&sys, erg, traj);
+    output(&sys, erg, traj, trajfile);
 
     /**************************************************/
     /* main MD loop */
@@ -302,7 +303,7 @@ int main(int argc, char **argv)
         timer_start("Output Writing");
         /* write output, if requested */
         if ((sys.nfi % nprint) == 0)
-            output(&sys, erg, traj);
+            output(&sys, erg, traj, trajfile);
         timer_pause("Output Writing");
         //printf("Finished output %d. ", sys.nfi);
 

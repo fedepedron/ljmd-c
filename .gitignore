@@ -37,6 +37,11 @@
 *.hex
 *.x
 
+# Run outputs
+*.nc
+*.xyz
+*.dat
+
 # Debug files
 *.dSYM/
 *.su

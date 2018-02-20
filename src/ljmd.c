@@ -1,4 +1,4 @@
-/* 
+/*
  * simple lennard-jones potential MD code with velocity verlet.
  * units: Length=Angstrom, Mass=amu; Energy=kcal
  *
@@ -10,6 +10,8 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <math.h>
+#include "timers.h"
+
 
 /* generic file- or pathname buffer length */
 #define BLEN 200
@@ -18,7 +20,7 @@
 const double kboltz=0.0019872067;     /* boltzman constant in kcal/mol/K */
 const double mvsq2e=2390.05736153349; /* m*v^2 in kcal/mol */
 
-/* structure to hold the complete information 
+/* structure to hold the complete information
  * about the MD system */
 struct _mdsys {
     int natoms,nfi,nsteps;
@@ -58,7 +60,7 @@ static int get_a_line(FILE *fp, char *buf)
     }
     return 0;
 }
- 
+
 /* helper function: zero out an array */
 static void azzero(double *d, const int n)
 {
@@ -78,7 +80,7 @@ static double pbc(double x, const double boxby2)
 
 /* compute kinetic energy */
 static void ekin(mdsys_t *sys)
-{   
+{
     int i;
 
     sys->ekin=0.0;
@@ -89,7 +91,7 @@ static void ekin(mdsys_t *sys)
 }
 
 /* compute forces */
-static void force(mdsys_t *sys) 
+static void force(mdsys_t *sys)
 {
     double r,ffac;
     double rx,ry,rz;
@@ -106,18 +108,18 @@ static void force(mdsys_t *sys)
 
             /* particles have no interactions with themselves */
             if (i==j) continue;
-            
+
             /* get distance between particle i and j */
             rx=pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
             ry=pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
             rz=pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
             r = sqrt(rx*rx + ry*ry + rz*rz);
-      
+
             /* compute force and energy if within cutoff */
             if (r < sys->rcut) {
                 ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r
                                          +6*pow(sys->sigma/r,6.0)/r);
-                
+
                 sys->epot += 0.5*4.0*sys->epsilon*(pow(sys->sigma/r,12.0)
                                                -pow(sys->sigma/r,6.0));
 
@@ -159,7 +161,7 @@ static void velverlet(mdsys_t *sys)
 static void output(mdsys_t *sys, FILE *erg, FILE *traj)
 {
     int i;
-    
+
     printf("% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp, sys->ekin, sys->epot, sys->ekin+sys->epot);
     fprintf(erg,"% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp, sys->ekin, sys->epot, sys->ekin+sys->epot);
     fprintf(traj,"%d\n nfi=%d etot=%20.8f\n", sys->natoms, sys->nfi, sys->ekin+sys->epot);
@@ -170,13 +172,15 @@ static void output(mdsys_t *sys, FILE *erg, FILE *traj)
 
 
 /* main */
-int main(int argc, char **argv) 
+int main(int argc, char **argv)
 {
+    timer_start("Total");
     int nprint, i;
     char restfile[BLEN], trajfile[BLEN], ergfile[BLEN], line[BLEN];
     FILE *fp,*traj,*erg;
     mdsys_t sys;
 
+    timer_start("Input Read");
     /* read input file */
     if(get_a_line(stdin,line)) return 1;
     sys.natoms=atoi(line);
@@ -228,12 +232,13 @@ int main(int argc, char **argv)
         perror("cannot read restart file");
         return 3;
     }
+    timer_stop("Input Read");
 
     /* initialize forces and energies.*/
     sys.nfi=0;
     force(&sys);
     ekin(&sys);
-    
+
     erg=fopen(ergfile,"w");
     traj=fopen(trajfile,"w");
 
@@ -243,16 +248,25 @@ int main(int argc, char **argv)
 
     /**************************************************/
     /* main MD loop */
+    //timer_start("Main Loop");
     for(sys.nfi=1; sys.nfi <= sys.nsteps; ++sys.nfi) {
 
+        timer_start("Output Writing");
         /* write output, if requested */
         if ((sys.nfi % nprint) == 0)
             output(&sys, erg, traj);
+        timer_pause("Output Writing");
 
         /* propagate system and recompute energies */
+        timer_start("Verlet Propagation");
         velverlet(&sys);
+        timer_pause("Verlet Propagation");
+
+        timer_start("Energy Calculation");
         ekin(&sys);
+        timer_pause("Energy Calculation");
     }
+    //timer_stop("Main Loop");
     /**************************************************/
 
     /* clean up: close files, free memory */
@@ -270,5 +284,7 @@ int main(int argc, char **argv)
     free(sys.fy);
     free(sys.fz);
 
+    timer_stop("Total");
+    print_timers();
     return 0;
 }

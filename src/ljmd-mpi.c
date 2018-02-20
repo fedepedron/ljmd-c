@@ -111,13 +111,16 @@ static void force_ngb(mdsys_t *sys)
     azzero(sys->fy,sys->natoms);
     azzero(sys->fz,sys->natoms);
 
+    double epot = 0.0;
+    
+    #pragma omp parallel for reduction(+:epot)
     for(int i=0; i < (sys->natoms); i++) {
         double fx   = sys->fx[i];
         double fy   = sys->fy[i];
         double fz   = sys->fz[i];
-        double epot = sys->epot;
+        double loc_epot = 0.0;
 
-        #pragma omp parallel for reduction(+:fx, fy, fz, epot)
+        #pragma omp parallel for reduction(+:fx, fy, fz, loc_epot)
         for(int ingb=0; ingb < (sys->n_ngb[i]); ingb++) {
             int j = sys->ngb_list[ingb + i*(sys->natoms)];
             double rx=pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
@@ -127,7 +130,7 @@ static void force_ngb(mdsys_t *sys)
 
             double ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r
                                          +6*pow(sys->sigma/r,6.0)/r);
-            epot += 0.5*4.0*sys->epsilon*(pow(sys->sigma/r,12.0)
+            loc_epot += 0.5*4.0*sys->epsilon*(pow(sys->sigma/r,12.0)
                                           -pow(sys->sigma/r,6.0));
             fx += rx/r*ffac;
             fy += ry/r*ffac;
@@ -137,8 +140,10 @@ static void force_ngb(mdsys_t *sys)
         sys->fx[i] = fx;
         sys->fy[i] = fy;
         sys->fz[i] = fz;
-        sys->epot  = epot;
+        epot += loc_epot;
     }
+
+    sys->epot = epot;
     return;
 }
 

@@ -29,6 +29,9 @@ struct _mdsys {
     double *rx, *ry, *rz;
     double *vx, *vy, *vz;
     double *fx, *fy, *fz;
+    int *n_ngb;
+    int *ngb_list;
+    double *d_ngb;
 };
 typedef struct _mdsys mdsys_t;
 
@@ -70,6 +73,14 @@ static void azzero(double *d, const int n)
     }
 }
 
+static void azzero_i(int *a, const int n)
+{
+    int i;
+    for (i=0; i<n; ++i) {
+        a[i]=0.0;
+    }
+}
+
 /* helper function: apply minimum image convention */
 static double pbc(double x, const double boxby2)
 {
@@ -91,52 +102,70 @@ static void ekin(mdsys_t *sys)
 }
 
 /* compute forces */
-static void force(mdsys_t *sys)
+static void force_ngb(mdsys_t *sys)
 {
-    double r,ffac;
-    double rx,ry,rz;
-    int i,j;
-
     /* zero energy and forces */
     sys->epot=0.0;
     azzero(sys->fx,sys->natoms);
     azzero(sys->fy,sys->natoms);
     azzero(sys->fz,sys->natoms);
 
-    for(i=0; i < (sys->natoms); ++i) {
-        double fx = sys->fx[i];
-        double fy = sys->fy[i];
-        double fz = sys->fz[i];
+    for(int i=0; i < (sys->natoms); i++) {
+        double fx   = sys->fx[i];
+        double fy   = sys->fy[i];
+        double fz   = sys->fz[i];
         double epot = sys->epot;
 
         #pragma omp parallel for reduction(+:fx, fy, fz, epot)
-        for(j=0; j < (sys->natoms); ++j) {
+        for(int ingb=0; ingb < (sys->n_ngb[i]); ingb++) {
+            int j = sys->ngb_list[ingb + i*(sys->natoms)];
+            double rx=pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
+            double ry=pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
+            double rz=pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
+            double r = sqrt(rx*rx + ry*ry + rz*rz);
 
-            /* particles have no interactions with themselves */
-            if (i==j) continue;
-
-            /* get distance between particle i and j */
-            rx=pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
-            ry=pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
-            rz=pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
-            r = sqrt(rx*rx + ry*ry + rz*rz);
-
-            /* compute force and energy if within cutoff */
-            if (r < sys->rcut) {
-                ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r
+            double ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r
                                          +6*pow(sys->sigma/r,6.0)/r);
-                epot += 0.5*4.0*sys->epsilon*(pow(sys->sigma/r,12.0)
-                                               -pow(sys->sigma/r,6.0));
-                fx += rx/r*ffac;
-                fy += ry/r*ffac;
-                fz += rz/r*ffac;
-            }
+            epot += 0.5*4.0*sys->epsilon*(pow(sys->sigma/r,12.0)
+                                          -pow(sys->sigma/r,6.0));
+            fx += rx/r*ffac;
+            fy += ry/r*ffac;
+            fz += rz/r*ffac;
         }
+
         sys->fx[i] = fx;
         sys->fy[i] = fy;
         sys->fz[i] = fz;
-        sys->epot = epot;
+        sys->epot  = epot;
     }
+    return;
+}
+
+/* Create Neighbour list using cutoff */
+void make_ngb_list(mdsys_t *sys)
+{
+  for(int i=0; i < (sys->natoms); i++) {
+    int tmp_ngb = 0;
+    
+    #pragma omp parallel for
+    for(int j=0; j < (sys->natoms); j++) {
+      if (i==j) continue;
+      double rx  = pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
+      double ry  = pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
+      double rz  = pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
+      sys->d_ngb[i*(sys->natoms) + j] = sqrt(rx*rx + ry*ry + rz*rz);
+    }
+
+    for(int j=0; j < (sys->natoms); j++) {
+      if (i==j) continue;
+      if (sys->d_ngb[i*(sys->natoms) + j] < sys->rcut) {
+        sys->ngb_list[i*(sys->natoms) + tmp_ngb] = j;
+        tmp_ngb++;
+      }
+    }
+    sys->n_ngb[i] = tmp_ngb;
+  }
+  return;
 }
 
 /* velocity verlet */
@@ -155,7 +184,8 @@ static void velverlet(mdsys_t *sys)
     }
 
     /* compute forces and potential energy */
-    force(sys);
+    make_ngb_list(sys);
+    force_ngb(sys);
 
     /* second part: propagate velocities by another half step */
     for (i=0; i<sys->natoms; ++i) {
@@ -163,8 +193,9 @@ static void velverlet(mdsys_t *sys)
         sys->vy[i] += 0.5*sys->dt / mvsq2e * sys->fy[i] / sys->mass;
         sys->vz[i] += 0.5*sys->dt / mvsq2e * sys->fz[i] / sys->mass;
     }
-
 }
+
+
 
 /* append data to output. */
 static void output(mdsys_t *sys, FILE *erg, FILE *traj)
@@ -214,15 +245,18 @@ int main(int argc, char **argv)
     nprint=atoi(line);
 
     /* allocate memory */
-    sys.rx=(double *)malloc(sys.natoms*sizeof(double));
-    sys.ry=(double *)malloc(sys.natoms*sizeof(double));
-    sys.rz=(double *)malloc(sys.natoms*sizeof(double));
-    sys.vx=(double *)malloc(sys.natoms*sizeof(double));
-    sys.vy=(double *)malloc(sys.natoms*sizeof(double));
-    sys.vz=(double *)malloc(sys.natoms*sizeof(double));
-    sys.fx=(double *)malloc(sys.natoms*sizeof(double));
-    sys.fy=(double *)malloc(sys.natoms*sizeof(double));
-    sys.fz=(double *)malloc(sys.natoms*sizeof(double));
+    sys.rx      = (double *)malloc(sys.natoms*sizeof(double));
+    sys.ry      = (double *)malloc(sys.natoms*sizeof(double));
+    sys.rz      = (double *)malloc(sys.natoms*sizeof(double));
+    sys.vx      = (double *)malloc(sys.natoms*sizeof(double));
+    sys.vy      = (double *)malloc(sys.natoms*sizeof(double));
+    sys.vz      = (double *)malloc(sys.natoms*sizeof(double));
+    sys.fx      = (double *)malloc(sys.natoms*sizeof(double));
+    sys.fy      = (double *)malloc(sys.natoms*sizeof(double));
+    sys.fz      = (double *)malloc(sys.natoms*sizeof(double));
+    sys.d_ngb   = (double *)malloc(sys.natoms*sys.natoms*sizeof(double));
+    sys.n_ngb   =     (int*)malloc(sys.natoms*sizeof(int));
+    sys.ngb_list=     (int*)malloc(sys.natoms*sys.natoms*sizeof(int));
 
     /* read restart */
     fp=fopen(restfile,"r");
@@ -241,11 +275,16 @@ int main(int argc, char **argv)
         perror("cannot read restart file");
         return 3;
     }
+
+    azzero_i(sys.n_ngb, sys.natoms);
+    azzero_i(sys.ngb_list, sys.natoms + sys.natoms);
+
     timer_stop("Input Read");
 
     /* initialize forces and energies.*/
     sys.nfi=0;
-    force(&sys);
+    make_ngb_list(&sys);
+    force_ngb(&sys);
     ekin(&sys);
 
     erg=fopen(ergfile,"w");
@@ -258,22 +297,24 @@ int main(int argc, char **argv)
     /**************************************************/
     /* main MD loop */
     //timer_start("Main Loop");
-    for(sys.nfi=1; sys.nfi <= sys.nsteps; ++sys.nfi) {
-
+    for(sys.nfi=1; sys.nfi <= sys.nsteps; sys.nfi++) {
+        //printf("Started step %d. ", sys.nfi);
         timer_start("Output Writing");
         /* write output, if requested */
         if ((sys.nfi % nprint) == 0)
             output(&sys, erg, traj);
         timer_pause("Output Writing");
+        //printf("Finished output %d. ", sys.nfi);
 
         /* propagate system and recompute energies */
         timer_start("Verlet Propagation");
         velverlet(&sys);
         timer_pause("Verlet Propagation");
-
+        //printf("Finished verlet %d. ", sys.nfi);
         timer_start("Energy Calculation");
         ekin(&sys);
         timer_pause("Energy Calculation");
+        //printf("Finished Ekin %d.\n", sys.nfi);
     }
     //timer_stop("Main Loop");
     /**************************************************/

@@ -5,7 +5,7 @@ CFLAGS=-Wall -g -O3 -ffast-math -fomit-frame-pointer
 LDLIBS=-lm
 
 # list of source files
-SRC=ljmd.c timers.h
+SRC=ljmd.c timers.h timers.c
 VPATH=../src
 OBJ=$(SRC:%.c=%.o)
 
@@ -21,10 +21,7 @@ clean:
 # compilation pattern rule for objects
 %.o: %.c
 	$(CC) -c $(CFLAGS) $<
-%.gch: %.h
-	$(CC) -c $(CFLAGS) $<
-
 
 # dependencies
-timers.gch: timers.h
+timers.o: timers.c timers.h
 ljmd.o: ljmd.c timers.h

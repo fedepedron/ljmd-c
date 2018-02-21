@@ -33,7 +33,6 @@ struct _mdsys {
   double *fx, *fy, *fz;
   int *n_ngb;
   int *ngb_list;
-  double *d_ngb;
 };
 typedef struct _mdsys mdsys_t;
 
@@ -129,32 +128,29 @@ static void force_ngb(mdsys_t *sys)
 
     #pragma omp parallel for reduction(+:epot)
     for(int i=0; i < (sys->natoms); i++) {
-        double fx   = sys->fx[i];
-        double fy   = sys->fy[i];
-        double fz   = sys->fz[i];
-        double loc_epot = 0.0;
+      double fx = 0.0;
+      double fy = 0.0;
+      double fz = 0.0;
+      double lepot = 0.0;
 
-        #pragma omp parallel for reduction(+:fx, fy, fz, loc_epot)
-        for(int ingb=0; ingb < (sys->n_ngb[i]); ingb++) {
-            int j = sys->ngb_list[ingb + i*NGB_MAX];
-            double rx=pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
-            double ry=pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
-            double rz=pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
-            double r = sqrt(rx*rx + ry*ry + rz*rz);
+      for(int ingb=0; ingb < (sys->n_ngb[i]); ingb++) {
+        int j = sys->ngb_list[ingb + i*NGB_MAX];
+        double rx=pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
+        double ry=pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
+        double rz=pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
+        double r = sqrt(rx*rx + ry*ry + rz*rz);
 
-            double ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r
-                                         +6*pow(sys->sigma/r,6.0)/r);
-            loc_epot += 0.5*4.0*sys->epsilon*(pow(sys->sigma/r,12.0)
-                                          -pow(sys->sigma/r,6.0));
-            fx += rx/r*ffac;
-            fy += ry/r*ffac;
-            fz += rz/r*ffac;
-        }
-
-        sys->fx[i] = fx;
-        sys->fy[i] = fy;
-        sys->fz[i] = fz;
-        epot += loc_epot;
+        double ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r
+                                         +   6*pow(sys->sigma/r,6.0)/r);
+        lepot += 0.5*4.0*sys->epsilon*(pow(sys->sigma/r,12.0)
+                                      -pow(sys->sigma/r,6.0));
+        fx += rx/r*ffac;
+        fy += ry/r*ffac;
+        fz += rz/r*ffac;
+      }
+      fx = sys->fx[i];
+      fy = sys->fy[i];
+      fz = sys->fz[i];
     }
 
     sys->epot = epot;
@@ -164,43 +160,19 @@ static void force_ngb(mdsys_t *sys)
 /* Create Neighbour list using cutoff */
 void make_ngb_list(mdsys_t *sys)
 {
-  if (sys->natoms < 15000){
-    for(int i=0; i < (sys->natoms); i++) {
-      int tmp_ngb = 0;
+  azzero_i(sys->n_ngb, sys->natoms);
+  for(int i=0; i < (sys->natoms); i++) {
+    for(int j=0; j < i; j++) {
+      double rx  = pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
+      double ry  = pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
+      double rz  = pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
+      double r   = sqrt(rx*rx + ry*ry + rz*rz);
 
-      #pragma omp parallel for
-      for(int j=0; j < (sys->natoms); j++) {
-        if (i==j) continue;
-        double rx  = pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
-        double ry  = pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
-        double rz  = pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
-        sys->d_ngb[i*(sys->natoms) + j] = sqrt(rx*rx + ry*ry + rz*rz);
-      }
-
-      for(int j=0; j < (sys->natoms); j++) {
-        if (i==j) continue;
-        if (sys->d_ngb[i*(sys->natoms) + j] < sys->rcut) {
-          sys->ngb_list[i*NGB_MAX + tmp_ngb] = j;
-          tmp_ngb++;
-        }
-      }
-      sys->n_ngb[i] = tmp_ngb;
-    }
-  } else {
-    azzero_i(sys->n_ngb, sys->natoms);
-    for(int i=0; i < (sys->natoms); i++) {
-      for(int j=0; j < i; j++) {
-        double rx  = pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
-        double ry  = pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
-        double rz  = pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
-        double r   = sqrt(rx*rx + ry*ry + rz*rz);
-
-        if (r < sys->rcut) {
-          sys->ngb_list[i*NGB_MAX + sys->n_ngb[i]] = j;
-          sys->ngb_list[j*NGB_MAX + sys->n_ngb[j]] = j;
-          sys->n_ngb[i]++;
-          sys->n_ngb[j]++;
-        }
+      if (r < sys->rcut) {
+        sys->ngb_list[i*NGB_MAX + sys->n_ngb[i]] = i;
+        sys->ngb_list[j*NGB_MAX + sys->n_ngb[j]] = j;
+        sys->n_ngb[i]++;
+        sys->n_ngb[j]++;
       }
     }
   }
@@ -299,7 +271,7 @@ int main(int argc, char **argv)
   // Create MPI types for messaging inputs and broadcasts data.
   int array_count = 2;
   int array_blk[2]  = {2, 6};
-  MPI_Aint array_disp[2] = {0, 0};
+  MPI_Aint array_disp[2] = {0, 2*sizeof(int)};
   MPI_Datatype array_typ[2] = {MPI_INT, MPI_DOUBLE};
   MPI_Datatype MD_INP;
   MPI_Type_struct(array_count, &array_blk[0], &array_disp[0], &array_typ[0],
@@ -318,47 +290,6 @@ int main(int argc, char **argv)
   sys.dt      = input_buffer.dt;
 
   // Creates buffer for restart reading.
-  crdvel_buffer.rx = (double *)malloc(sys.natoms*sizeof(double));
-  crdvel_buffer.ry = (double *)malloc(sys.natoms*sizeof(double));
-  crdvel_buffer.rz = (double *)malloc(sys.natoms*sizeof(double));
-  crdvel_buffer.vx = (double *)malloc(sys.natoms*sizeof(double));
-  crdvel_buffer.vy = (double *)malloc(sys.natoms*sizeof(double));
-  crdvel_buffer.vz = (double *)malloc(sys.natoms*sizeof(double));
-
-  // Rank 0 reads restart.
-  if (my_rank == 0) {
-    fp=fopen(restfile,"r");
-    if(fp) {
-      for (int i=0; i<sys.natoms; ++i) {
-        fscanf(fp, "%lf%lf%lf", crdvel_buffer.rx + i, crdvel_buffer.ry + i,
-               crdvel_buffer.rz + i);
-      }
-      for (int i=0; i<sys.natoms; ++i) {
-        fscanf(fp, "%lf%lf%lf", crdvel_buffer.vx + i, crdvel_buffer.vy + i,
-               crdvel_buffer.vz+i);
-      }
-      fclose(fp);
-    } else {
-      perror("cannot read restart file");
-      return 3;
-    }
-    timer_stop("Input Read");
-  }
-
-  // Rank 0 broadcasts velocities and coordinates to the rest.
-  MPI_Datatype MD_CRDVEL;
-  //
-  int array_countb = 1;
-  int array_blkb[2]  = {6*sys.natoms};
-  MPI_Aint array_dispb[1] = {0};
-  MPI_Datatype array_typb[1] = {MPI_DOUBLE};
-  MPI_Type_struct(array_countb, &array_blkb[0], &array_dispb[0], &array_typb[0],
-                  &MD_CRDVEL);
-  //MPI_Type_contiguous(sys.natoms*6, MPI_DOUBLE, &MD_CRDVEL);
-  MPI_Type_commit(&MD_CRDVEL);
-  MPI_Bcast((void*) &crdvel_buffer, 1, MD_CRDVEL, 0, MPI_COMM_WORLD);
-
-  /* allocate memory */
   sys.rx      = (double *)malloc(sys.natoms*sizeof(double));
   sys.ry      = (double *)malloc(sys.natoms*sizeof(double));
   sys.rz      = (double *)malloc(sys.natoms*sizeof(double));
@@ -371,32 +302,36 @@ int main(int argc, char **argv)
   sys.n_ngb   =     (int*)malloc(sys.natoms*sizeof(int));
   sys.ngb_list=     (int*)malloc(sys.natoms*NGB_MAX*sizeof(int));
 
-  if (sys.natoms < 15000)
-    sys.d_ngb = (double *)malloc(sys.natoms*sys.natoms*sizeof(double));
-
-  for (int i=0; i < sys.natoms; i++) {
-    if (my_rank == 1) printf("I am at %d \n", i);
-    sys.rx[i] = crdvel_buffer.rx[i];
-    sys.ry[i] = crdvel_buffer.ry[i];
-    sys.rz[i] = crdvel_buffer.rz[i];
-    sys.vx[i] = crdvel_buffer.vx[i];
-    sys.vy[i] = crdvel_buffer.vy[i];
-    sys.vz[i] = crdvel_buffer.vz[i];
-  }
-  printf("equal %d \n", my_rank);
-
-  MPI_Barrier(MPI_COMM_WORLD);
-
-  if(my_rank == 0) {
-    free(crdvel_buffer.rx);
-    free(crdvel_buffer.ry);
-    free(crdvel_buffer.rz);
-    free(crdvel_buffer.vx);
-    free(crdvel_buffer.vy);
-    free(crdvel_buffer.vz);
+  // Rank 0 reads restart.
+  if (my_rank == 0) {
+    fp=fopen(restfile,"r");
+    if(fp) {
+      for (int i=0; i<sys.natoms; ++i) {
+        fscanf(fp, "%lf%lf%lf", sys.rx + i, sys.ry + i,
+               sys.rz + i);
+      }
+      for (int i=0; i<sys.natoms; ++i) {
+        fscanf(fp, "%lf%lf%lf", sys.vx + i, sys.vy + i,
+               sys.vz+i);
+      }
+      fclose(fp);
+    } else {
+      perror("cannot read restart file");
+      return 3;
+    }
+    timer_stop("Input Read");
   }
 
-  printf("Freed %d \n", my_rank);
+  // Rank 0 broadcasts velocities and coordinates to the rest.
+  MPI_Datatype MD_CRDVEL;
+  MPI_Type_contiguous(sys.natoms, MPI_DOUBLE, &MD_CRDVEL);
+  MPI_Type_commit(&MD_CRDVEL);
+  MPI_Bcast((void*) sys.rx, 1, MD_CRDVEL, 0, MPI_COMM_WORLD);
+  MPI_Bcast((void*) sys.ry, 1, MD_CRDVEL, 0, MPI_COMM_WORLD);
+  MPI_Bcast((void*) sys.rz, 1, MD_CRDVEL, 0, MPI_COMM_WORLD);
+  MPI_Bcast((void*) sys.vx, 1, MD_CRDVEL, 0, MPI_COMM_WORLD);
+  MPI_Bcast((void*) sys.vy, 1, MD_CRDVEL, 0, MPI_COMM_WORLD);
+  MPI_Bcast((void*) sys.vz, 1, MD_CRDVEL, 0, MPI_COMM_WORLD);
 
   azzero(sys.fx, sys.natoms);
   azzero(sys.fy, sys.natoms);
@@ -419,8 +354,6 @@ int main(int argc, char **argv)
     output(&sys, erg, traj, trajfile);
   }
 
-  printf("Main loop %d \n", my_rank);
-
   // MAIN LOOP
   //timer_start("Main Loop");
   for(sys.nfi=1; sys.nfi <= sys.nsteps; sys.nfi++) {
@@ -442,30 +375,29 @@ int main(int argc, char **argv)
 
     if (my_rank == 0)  timer_pause("Energy Calculation");
 
-    }
+  }
     //timer_stop("Main Loop");
-    /**************************************************/
 
-    /* clean up: close files, free memory */
-    printf("Simulation Done.\n");
-    fclose(erg);
-    fclose(traj);
+  /* clean up: close files, free memory */
+  printf("Simulation Done. %d\n", my_rank);
 
-    free(sys.rx);
-    free(sys.ry);
-    free(sys.rz);
-    free(sys.vx);
-    free(sys.vy);
-    free(sys.vz);
-    free(sys.fx);
-    free(sys.fy);
-    free(sys.fz);
+  free(sys.rx);
+  free(sys.ry);
+  free(sys.rz);
+  free(sys.vx);
+  free(sys.vy);
+  free(sys.vz);
+  free(sys.fx);
+  free(sys.fy);
+  free(sys.fz);
+  free(sys.n_ngb);
+  free(sys.ngb_list);
 
-    free(sys.n_ngb);
-    free(sys.ngb_list);
-    if (sys.natoms < 15000) free(sys.d_ngb);
-
+  if (my_rank == 0) {
     timer_stop("Total");
     print_timers();
+    fclose(erg);
+    fclose(traj);
+  }
   MPI_Finalize();
 }

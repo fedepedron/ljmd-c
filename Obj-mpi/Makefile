@@ -1,6 +1,6 @@
 # -*- Makefile -*-
 SHELL=/bin/sh
-CC=mpic++
+CC=mpicxx
 CFLAGS=-Wall -g -O3 -ffast-math -fomit-frame-pointer -lnetcdf -std=c++11 -fopenmp
 LDLIBS=-lm -lnetcdf
 

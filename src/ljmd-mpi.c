@@ -97,7 +97,8 @@ static void ekin(mdsys_t *sys)
 
     sys->ekin=0.0;
     for (i=0; i<sys->natoms; ++i) {
-        sys->ekin += 0.5*mvsq2e*sys->mass*(sys->vx[i]*sys->vx[i] + sys->vy[i]*sys->vy[i] + sys->vz[i]*sys->vz[i]);
+        sys->ekin += 0.5*mvsq2e*sys->mass*(sys->vx[i]*sys->vx[i]
+                     + sys->vy[i]*sys->vy[i] + sys->vz[i]*sys->vz[i]);
     }
     sys->temp = 2.0*sys->ekin/(3.0*sys->natoms-3.0)/kboltz;
 }
@@ -112,7 +113,7 @@ static void force_ngb(mdsys_t *sys)
     azzero(sys->fz,sys->natoms);
 
     double epot = 0.0;
-    
+
     #pragma omp parallel for reduction(+:epot)
     for(int i=0; i < (sys->natoms); i++) {
         double fx   = sys->fx[i];
@@ -150,26 +151,43 @@ static void force_ngb(mdsys_t *sys)
 /* Create Neighbour list using cutoff */
 void make_ngb_list(mdsys_t *sys)
 {
-  for(int i=0; i < (sys->natoms); i++) {
-    int tmp_ngb = 0;
+  if (sys->natoms < 1500){
+    for(int i=0; i < (sys->natoms); i++) {
+      int tmp_ngb = 0;
 
-    #pragma omp parallel for
-    for(int j=0; j < (sys->natoms); j++) {
-      if (i==j) continue;
-      double rx  = pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
-      double ry  = pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
-      double rz  = pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
-      sys->d_ngb[i*(sys->natoms) + j] = sqrt(rx*rx + ry*ry + rz*rz);
+      #pragma omp parallel for
+      for(int j=0; j < (sys->natoms); j++) {
+        if (i==j) continue;
+        double rx  = pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
+        double ry  = pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
+        double rz  = pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
+        sys->d_ngb[i*(sys->natoms) + j] = sqrt(rx*rx + ry*ry + rz*rz);
+      }
+
+      for(int j=0; j < (sys->natoms); j++) {
+        if (i==j) continue;
+        if (sys->d_ngb[i*(sys->natoms) + j] < sys->rcut) {
+          sys->ngb_list[i*(sys->natoms) + tmp_ngb] = j;
+          tmp_ngb++;
+        }
+      }
+      sys->n_ngb[i] = tmp_ngb;
     }
-
-    for(int j=0; j < (sys->natoms); j++) {
-      if (i==j) continue;
-      if (sys->d_ngb[i*(sys->natoms) + j] < sys->rcut) {
-        sys->ngb_list[i*(sys->natoms) + tmp_ngb] = j;
-        tmp_ngb++;
+  } else {
+    for(int i=0; i < (sys->natoms); i++) {
+      for(int j=0; j < i; j++) {
+        double rx  = pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
+        double ry  = pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
+        double rz  = pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
+        double r   = sqrt(rx*rx + ry*ry + rz*rz);
+        if (r < sys->rcut) {
+          sys->ngb_list[i*(sys->natoms) + sys->n_ngb[i]] = j;
+          sys->ngb_list[j*(sys->natoms) + sys->n_ngb[j]] = j;
+          sys->n_ngb[i]++;
+          sys->n_ngb[j]++;
+        }
       }
     }
-    sys->n_ngb[i] = tmp_ngb;
   }
   return;
 }
@@ -206,13 +224,17 @@ static void velverlet(mdsys_t *sys)
 /* append data to output. */
 static void output(mdsys_t *sys, FILE *erg, FILE *traj, char* trajfile)
 {
-    printf("% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp, sys->ekin, sys->epot, sys->ekin+sys->epot);
-    fprintf(erg,"% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp, sys->ekin, sys->epot, sys->ekin+sys->epot);
+    printf("% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp,
+           sys->ekin, sys->epot, sys->ekin+sys->epot);
+    fprintf(erg,"% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp,
+            sys->ekin, sys->epot, sys->ekin+sys->epot);
     // Print trajectory using NetCDF format.
     write_to_netcdf(sys->rx, sys->ry, sys->rz, sys->natoms, trajfile);
-    //fprintf(traj,"%d\n nfi=%d etot=%20.8f\n", sys->natoms, sys->nfi, sys->ekin+sys->epot);
+    //fprintf(traj,"%d\n nfi=%d etot=%20.8f\n", sys->natoms, sys->nfi,
+    // sys->ekin+sys->epot);
     //for (int i=0; i<sys->natoms; ++i) {
-    //    fprintf(traj, "Ar  %20.8f %20.8f %20.8f\n", sys->rx[i], sys->ry[i], sys->rz[i]);
+    //    fprintf(traj, "Ar  %20.8f %20.8f %20.8f\n", sys->rx[i], sys->ry[i],
+    // sys->rz[i]);
     //}
 }
 
@@ -260,9 +282,11 @@ int main(int argc, char **argv)
     sys.fx      = (double *)malloc(sys.natoms*sizeof(double));
     sys.fy      = (double *)malloc(sys.natoms*sizeof(double));
     sys.fz      = (double *)malloc(sys.natoms*sizeof(double));
-    sys.d_ngb   = (double *)malloc(sys.natoms*sys.natoms*sizeof(double));
     sys.n_ngb   =     (int*)malloc(sys.natoms*sizeof(int));
     sys.ngb_list=     (int*)malloc(sys.natoms*sys.natoms*sizeof(int));
+
+    if (sys.natoms < 15000)
+        sys.d_ngb = (double *)malloc(sys.natoms*sys.natoms*sizeof(double));
 
     /* read restart */
     fp=fopen(restfile,"r");
@@ -307,8 +331,7 @@ int main(int argc, char **argv)
         //printf("Started step %d. ", sys.nfi);
         timer_start("Output Writing");
         /* write output, if requested */
-        if ((sys.nfi % nprint) == 0)
-            output(&sys, erg, traj, trajfile);
+        if ((sys.nfi % nprint) == 0) output(&sys, erg, traj, trajfile);
         timer_pause("Output Writing");
         //printf("Finished output %d. ", sys.nfi);
 

@@ -25,12 +25,14 @@ const double mvsq2e=2390.05736153349; /* m*v^2 in kcal/mol */
 /* structure to hold the complete information
  * about the MD system */
 struct _mdsys {
-  int natoms,nfi,nsteps;
+  int natoms, nfi, nsteps;
+  int nprint;
   double dt, mass, epsilon, sigma, box, rcut;
   double ekin, epot, temp;
-  double *rx, *ry, *rz;
+  double *rx, *ry, *rz; // These are only used in input read.
   double *vx, *vy, *vz;
   double *fx, *fy, *fz;
+  double *coordinates;  // XYZ coordinates for each atom.
 
   int *n_ngb;           // Number of total neighbours
   int *ngb_loc;         // Number of neighbours that are not ghosts.
@@ -38,6 +40,7 @@ struct _mdsys {
 
   int my_atoms;         // N° of atoms in current task.
   int ghost_atoms;      // N° of ghost atoms in current task.
+  int all_atoms;        // my_atoms + ghost_atoms;
   int *my_atom_list;    // List of original IDs of atoms in current task.
   int *ghost_atom_list; // List of original IDs of ghost atoms in current task.
   int atom_count_L;     // N° of atoms in tasks with id > natoms%ntasks.
@@ -49,18 +52,11 @@ struct _mdsys {
 };
 typedef struct _mdsys mdsys_t;
 
-struct _mdsysb {
-  int natoms, nsteps;
+struct __attribute__((packed)) _mdsysb {
+  int    natoms, nsteps, nprint;
   double dt, mass, epsilon, sigma, box, rcut;
 };
 typedef struct _mdsysb mdsys_inp_t;
-
-struct _crdvel_buf {
-  double *rx, *ry, *rz;
-  double *vx, *vy, *vz;
-};
-typedef struct _crdvel_buf crdvel_buf_t;
-
 
 //##############################################################################
 // HELPER FUNCTIONS
@@ -156,6 +152,8 @@ static void create_atom_list(mdsys_t *sys)
   for (int i = offset; i < sys->ghost_atoms ; i++) {
     sys->ghost_atom_list[i] = i + sys->my_atoms;
   }
+
+  sys->all_atoms = sys->ghost_atoms + sys->my_atoms;
 }
 
 static void ekin(mdsys_t *sys)
@@ -187,9 +185,14 @@ static void force_ngb(mdsys_t *sys)
       int j    = sys->my_atom_list[jloc];
 
       if (iloc < jloc) continue;
-      double rx = pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
-      double ry = pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
-      double rz = pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
+      double rx    = pbc(sys->coordinates[i] -
+                         sys->coordinates[j], 0.5*sys->box);
+      double ry    = pbc(sys->coordinates[i + sys->all_atoms] -
+                         sys->coordinates[j + sys->all_atoms],
+                         0.5*sys->box);
+      double rz    = pbc(sys->coordinates[i + 2*(sys->all_atoms)] -
+                         sys->coordinates[j + 2*(sys->all_atoms)],
+                         0.5*sys->box);
       double r  = sqrt(rx*rx + ry*ry + rz*rz);
 
       double ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r +
@@ -203,15 +206,19 @@ static void force_ngb(mdsys_t *sys)
       sys->fy[jloc] -= sys->fy[iloc];
       sys->fz[jloc] -= sys->fz[iloc];
     }
-
+    if ((sys->my_rank == 0) && iloc < 1) printf("Energy %10.6f\n", epot);
     // Iterates through all ghost atoms.
-
     for(int ingb = sys->ngb_loc[iloc]; ingb < sys->n_ngb[iloc]; ingb++) {
       int jloc = sys->ngb_list[ingb + iloc*NGB_MAX];
       int j    = sys->ghost_atom_list[jloc];
-      double rx=pbc(sys->rx[i] - sys->rx[j], 0.5*sys->box);
-      double ry=pbc(sys->ry[i] - sys->ry[j], 0.5*sys->box);
-      double rz=pbc(sys->rz[i] - sys->rz[j], 0.5*sys->box);
+      double rx    = pbc(sys->coordinates[i] -
+                         sys->coordinates[j], 0.5*sys->box);
+      double ry    = pbc(sys->coordinates[i + sys->all_atoms] -
+                         sys->coordinates[j + sys->all_atoms],
+                         0.5*sys->box);
+      double rz    = pbc(sys->coordinates[i + 2*(sys->all_atoms)] -
+                         sys->coordinates[j + 2*(sys->all_atoms)],
+                         0.5*sys->box);
       double r = sqrt(rx*rx + ry*ry + rz*rz);
 
       double ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r +
@@ -222,6 +229,7 @@ static void force_ngb(mdsys_t *sys)
       sys->fy[iloc] += ry/r*ffac;
       sys->fz[iloc] += rz/r*ffac;
     }
+    if ((sys->my_rank == 0) && iloc < 1) printf("Energy %10.6f\n", epot);
   }
 
   sys->epot = epot;
@@ -236,12 +244,17 @@ void make_ngb_list(mdsys_t *sys)
   for(int i=0; i < sys->my_atoms; i++) {
     int my_id = sys->my_atom_list[i];
     for(int j = i+1; j < sys->my_atoms; j++) {
-      int atom_id  = sys->my_atom_list[j];
-      double rx    = pbc(sys->rx[my_id] - sys->rx[atom_id], 0.5*sys->box);
-      double ry    = pbc(sys->ry[my_id] - sys->ry[atom_id], 0.5*sys->box);
-      double rz    = pbc(sys->rz[my_id] - sys->rz[atom_id], 0.5*sys->box);
-      double r     = sqrt(rx*rx + ry*ry + rz*rz);
 
+      int atom_id  = sys->my_atom_list[j];
+      double rx    = pbc(sys->coordinates[my_id] -
+                         sys->coordinates[atom_id], 0.5*sys->box);
+      double ry    = pbc(sys->coordinates[my_id + sys->all_atoms] -
+                         sys->coordinates[atom_id + sys->all_atoms],
+                         0.5*sys->box);
+      double rz    = pbc(sys->coordinates[my_id + 2*(sys->all_atoms)] -
+                         sys->coordinates[atom_id + 2*(sys->all_atoms)],
+                         0.5*sys->box);
+      double r     = sqrt(rx*rx + ry*ry + rz*rz);
       if (r < sys->rcut) {
         sys->ngb_list[i*NGB_MAX + sys->n_ngb[i]] = j;
         sys->ngb_list[j*NGB_MAX + sys->n_ngb[j]] = i;
@@ -254,9 +267,14 @@ void make_ngb_list(mdsys_t *sys)
 
     for(int j=0; j < sys->ghost_atoms; j++) {
       int atom_id  = sys->ghost_atom_list[j];
-      double rx    = pbc(sys->rx[my_id] - sys->rx[atom_id], 0.5*sys->box);
-      double ry    = pbc(sys->ry[my_id] - sys->ry[atom_id], 0.5*sys->box);
-      double rz    = pbc(sys->rz[my_id] - sys->rz[atom_id], 0.5*sys->box);
+      double rx    = pbc(sys->coordinates[my_id] -
+                         sys->coordinates[atom_id], 0.5*sys->box);
+      double ry    = pbc(sys->coordinates[my_id + sys->all_atoms] -
+                         sys->coordinates[atom_id + sys->all_atoms],
+                         0.5*sys->box);
+      double rz    = pbc(sys->coordinates[my_id + 2*(sys->all_atoms)] -
+                         sys->coordinates[atom_id + 2*(sys->all_atoms)],
+                         0.5*sys->box);
       double r     = sqrt(rx*rx + ry*ry + rz*rz);
 
       if (r < sys->rcut) {
@@ -268,6 +286,12 @@ void make_ngb_list(mdsys_t *sys)
   return;
 }
 
+static void task_update_coords(mdsys_t *sys)
+{
+
+}
+
+
 /* velocity verlet */
 static void velverlet(mdsys_t *sys)
 {
@@ -277,23 +301,25 @@ static void velverlet(mdsys_t *sys)
     sys->vx[i] += 0.5*sys->dt / mvsq2e * sys->fx[i] / sys->mass;
     sys->vy[i] += 0.5*sys->dt / mvsq2e * sys->fy[i] / sys->mass;
     sys->vz[i] += 0.5*sys->dt / mvsq2e * sys->fz[i] / sys->mass;
-    sys->rx[i] += sys->dt*sys->vx[i];
-    sys->ry[i] += sys->dt*sys->vy[i];
-    sys->rz[i] += sys->dt*sys->vz[i];
+    sys->coordinates[i] += sys->dt*sys->vx[i];
+    sys->coordinates[i + sys->all_atoms] += sys->dt*sys->vy[i];
+    sys->coordinates[i + 2*(sys->all_atoms)] += sys->dt*sys->vz[i];
   }
 
   /* compute forces and potential energy */
   if (sys->my_rank == 0) timer_start("Neighbour List");
   make_ngb_list(sys);
+
   if (sys->my_rank == 0) {
     timer_pause("Neighbour List");
     timer_start("Force Calculation");
   }
+
   force_ngb(sys);
   if (sys->my_rank == 0) timer_pause("Force Calculation");
 
   /* second part: propagate velocities by another half step */
-  for (int id=0; id<sys->natoms; ++id) {
+  for (int id=0; id<sys->my_atoms; ++id) {
     int i = sys->my_atom_list[id];
     sys->vx[i] += 0.5*sys->dt / mvsq2e * sys->fx[i] / sys->mass;
     sys->vy[i] += 0.5*sys->dt / mvsq2e * sys->fy[i] / sys->mass;
@@ -304,26 +330,23 @@ static void velverlet(mdsys_t *sys)
 /* append data to output. */
 static void output(mdsys_t *sys, FILE *erg, FILE *traj, char* trajfile)
 {
-    printf("% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp,
-           sys->ekin, sys->epot, sys->ekin+sys->epot);
-    fprintf(erg,"% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp,
-            sys->ekin, sys->epot, sys->ekin+sys->epot);
-    // Print trajectory using NetCDF format.
-    write_to_netcdf(sys->rx, sys->ry, sys->rz, sys->natoms, trajfile);
+  printf("% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp,
+         sys->ekin, sys->epot, sys->ekin+sys->epot);
+  fprintf(erg,"% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp,
+          sys->ekin, sys->epot, sys->ekin+sys->epot);
+  // Print trajectory using NetCDF format.
+  write_to_netcdf(sys->rx, sys->ry, sys->rz, sys->natoms, trajfile);
 }
 
 //##############################################################################
-/* main */
 int main(int argc, char **argv)
 {
   MPI_Init(NULL,NULL);
 
   char restfile[BLEN], trajfile[BLEN], ergfile[BLEN], line[BLEN];
-  int nprint;
   FILE *fp,*traj,*erg;
   mdsys_t sys;
   mdsys_inp_t input_buffer;
-  crdvel_buf_t crdvel_buffer;
 
   MPI_Comm_rank(MPI_COMM_WORLD, &sys.my_rank);
   MPI_Comm_size(MPI_COMM_WORLD, &sys.n_tasks);
@@ -353,13 +376,13 @@ int main(int argc, char **argv)
     if(get_a_line(stdin,line)) return 1;
     input_buffer.dt=atof(line);
     if(get_a_line(stdin,line)) return 1;
-    nprint=atoi(line);
+    input_buffer.nprint=atoi(line);
   }
 
   // Create MPI types for messaging inputs and broadcasts data.
   int array_count = 2;
-  int array_blk[2]  = {2, 6};
-  MPI_Aint array_disp[2] = {0, 2*sizeof(int)};
+  int array_blk[2]  = {3, 6};
+  MPI_Aint array_disp[2] = {0, 3*sizeof(int)};
   MPI_Datatype array_typ[2] = {MPI_INT, MPI_DOUBLE};
   MPI_Datatype MD_INP;
   MPI_Type_struct(array_count, &array_blk[0], &array_disp[0], &array_typ[0],
@@ -375,28 +398,37 @@ int main(int argc, char **argv)
   sys.rcut    = input_buffer.rcut;
   sys.box     = input_buffer.box;
   sys.nsteps  = input_buffer.nsteps;
+  sys.nprint  = input_buffer.nprint;
   sys.dt      = input_buffer.dt;
 
+  if (sys.my_rank == 1) {
+    printf("HOLI %d %d %d  %12.2f %12.2f %12.2f %12.2f %12.2f %12.2f ",
+      sys.natoms, sys.nprint, sys.nsteps, sys.mass, sys.epsilon, sys.sigma,
+     sys.rcut, sys.box, sys.dt);
+  }
   // Creates local atom list and arrays.
   create_atom_list(&sys);
 
   // Creates buffer for restart reading.
-  sys.rx = (double *)malloc((sys.ghost_atoms+sys.my_atoms)*sizeof(double));
-  sys.ry = (double *)malloc((sys.ghost_atoms+sys.my_atoms)*sizeof(double));
-  sys.rz = (double *)malloc((sys.ghost_atoms+sys.my_atoms)*sizeof(double));
-  sys.vx = (double *)malloc((sys.ghost_atoms+sys.my_atoms)*sizeof(double));
-  sys.vy = (double *)malloc((sys.ghost_atoms+sys.my_atoms)*sizeof(double));
-  sys.vz = (double *)malloc((sys.ghost_atoms+sys.my_atoms)*sizeof(double));
+  sys.coordinates =
+           (double *)malloc(sys.all_atoms*sizeof(double)*3);
+  sys.vx = (double *)malloc(sys.all_atoms*sizeof(double));
+  sys.vy = (double *)malloc(sys.all_atoms*sizeof(double));
+  sys.vz = (double *)malloc(sys.all_atoms*sizeof(double));
 
   // Rank 0 reads restart and broadcasts velocities and coordinates to the rest.
   if (sys.my_rank == 0) {
+    sys.rx = (double *)malloc(sys.all_atoms*sizeof(double));
+    sys.ry = (double *)malloc(sys.all_atoms*sizeof(double));
+    sys.rz = (double *)malloc(sys.all_atoms*sizeof(double));
+
     fp=fopen(restfile,"r");
     if(fp) {
-      for (int i=0; i<sys.natoms; ++i) {
+      for (int i = 0; i < sys.all_atoms; ++i) {
         fscanf(fp, "%lf%lf%lf", sys.rx + i, sys.ry + i,
                sys.rz + i);
       }
-      for (int i=0; i<sys.natoms; ++i) {
+      for (int i = 0; i < sys.all_atoms; ++i) {
         fscanf(fp, "%lf%lf%lf", sys.vx + i, sys.vy + i,
                sys.vz+i);
       }
@@ -405,15 +437,27 @@ int main(int argc, char **argv)
       perror("cannot read restart file");
       return 3;
     }
+
+    for (int i = 0; i < sys.all_atoms; i++) {
+      sys.coordinates[i] = sys.rx[i];
+    }
+    for (int i = 0; i < sys.all_atoms; i++) {
+      sys.coordinates[i + sys.all_atoms] = sys.ry[i];
+    }
+    for (int i = 0; i < sys.all_atoms; i++) {
+      sys.coordinates[i + 2*(sys.all_atoms)] = sys.rz[i];
+    }
+
     timer_stop("Input Read");
+    free(sys.rx);
+    free(sys.ry);
+    free(sys.rz);
   }
 
   MPI_Datatype MD_CRDVEL;
-  MPI_Type_contiguous(sys.natoms, MPI_DOUBLE, &MD_CRDVEL);
+  MPI_Type_contiguous(sys.all_atoms, MPI_DOUBLE, &MD_CRDVEL);
   MPI_Type_commit(&MD_CRDVEL);
-  MPI_Bcast((void*) sys.rx, 1, MD_CRDVEL, 0, MPI_COMM_WORLD);
-  MPI_Bcast((void*) sys.ry, 1, MD_CRDVEL, 0, MPI_COMM_WORLD);
-  MPI_Bcast((void*) sys.rz, 1, MD_CRDVEL, 0, MPI_COMM_WORLD);
+  MPI_Bcast((void*) sys.coordinates, 3, MD_CRDVEL, 0, MPI_COMM_WORLD);
   MPI_Bcast((void*) sys.vx, 1, MD_CRDVEL, 0, MPI_COMM_WORLD);
   MPI_Bcast((void*) sys.vy, 1, MD_CRDVEL, 0, MPI_COMM_WORLD);
   MPI_Bcast((void*) sys.vz, 1, MD_CRDVEL, 0, MPI_COMM_WORLD);
@@ -424,19 +468,19 @@ int main(int argc, char **argv)
   sys.fz      = (double *)malloc(sys.my_atoms*sizeof(double));
   sys.n_ngb   =     (int*)malloc(sys.my_atoms*sizeof(int));
   sys.ngb_loc =     (int*)malloc(sys.my_atoms*sizeof(int));
-  sys.ngb_list=     (int*)malloc((sys.my_atoms)*NGB_MAX*sizeof(int));
+  sys.ngb_list=     (int*)malloc(sys.my_atoms*NGB_MAX*sizeof(int));
 
   azzero(sys.fx, sys.my_atoms);
   azzero(sys.fy, sys.my_atoms);
   azzero(sys.fz, sys.my_atoms);
-  azzero_i(sys.ngb_list, sys.my_atoms*(sys.my_atoms + sys.ghost_atoms));
+  azzero_i(sys.ngb_list, sys.my_atoms*sys.all_atoms);
 
   // Initializes forces, energies and outputs.
   sys.nfi=0;
   make_ngb_list(&sys);
   force_ngb(&sys);
   ekin(&sys);
-
+  printf("My energy %10.6f \n",sys.epot );
   if (sys.my_rank == 0) {
     MPI_Reduce(MPI_IN_PLACE, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
                MPI_COMM_WORLD);
@@ -454,14 +498,31 @@ int main(int argc, char **argv)
     MPI_Reduce((void*) &sys.ekin, (void*) &sys.ekin, 1, MPI_DOUBLE, MPI_SUM, 0,
                MPI_COMM_WORLD);
   }
-
+  return 0;
   // MAIN LOOP
   //timer_start("Main Loop");
   for(sys.nfi=1; sys.nfi <= sys.nsteps; sys.nfi++) {
-    if (sys.my_rank == 0) {
-      timer_start("Output Writing");
-      if ((sys.nfi % nprint) == 0) output(&sys, erg, traj, trajfile);
-      timer_pause("Output Writing");
+    if ((sys.nfi % sys.nprint) == 0) {
+      if (sys.my_rank == 0) {
+        timer_start("Output Writing");
+        MPI_Reduce(MPI_IN_PLACE, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
+                   MPI_COMM_WORLD);
+        MPI_Reduce(MPI_IN_PLACE, (void*) &sys.ekin, 1, MPI_DOUBLE, MPI_SUM, 0,
+                   MPI_COMM_WORLD);
+        output(&sys, erg, traj, trajfile);
+        timer_pause("Output Writing");
+      } else {
+        MPI_Reduce((void*) &sys.epot, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
+                   MPI_COMM_WORLD);
+        MPI_Reduce((void*) &sys.ekin, (void*) &sys.ekin, 1, MPI_DOUBLE, MPI_SUM, 0,
+                   MPI_COMM_WORLD);
+      }
+    }
+    if (sys.my_rank == 0)  timer_start("Coordinate Messaging");
+    task_update_coords(&sys);
+
+    if (sys.my_rank == 0)  {
+      timer_pause("Coordinate Messaging");
       timer_start("Verlet Propagation");
     }
 
@@ -484,6 +545,7 @@ int main(int argc, char **argv)
 
   free(sys.my_atom_list);
   free(sys.ghost_atom_list);
+  free(sys.coordinates);
   free(sys.rx);
   free(sys.ry);
   free(sys.rz);

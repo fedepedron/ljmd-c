@@ -16,7 +16,6 @@
 
 /* generic file- or pathname buffer length */
 #define BLEN 200
-#define NGB_MAX 200
 
 /* a few physical constants */
 const double kboltz=0.0019872067;     /* boltzman constant in kcal/mol/K */
@@ -33,10 +32,6 @@ struct _mdsys {
   double *vx, *vy, *vz;
   double *fx, *fy, *fz;
   double *coordinates;  // XYZ coordinates for each atom.
-
-  int *n_ngb;           // Number of total neighbours
-  int *ngb_loc;         // Number of neighbours that are not ghosts.
-  int *ngb_list;        // List of original IDs of neighbours.
 
   int my_atoms;         // N° of atoms in current task.
   int ghost_atoms;      // N° of ghost atoms in current task.
@@ -185,14 +180,13 @@ static void force_ngb(mdsys_t *sys)
 
   double epot = 0.0;
 
-  for(int iloc=0; iloc < (sys->my_atoms); iloc++) {
+  for(int iloc=0; iloc < sys->my_atoms; iloc++) {
     int i = sys->my_atom_list[iloc];
     // Iterates through all local atoms.
-    for(int ingb=0; ingb < (sys->ngb_loc[iloc]); ingb++) {
-      int jloc = sys->ngb_list[ingb + iloc*NGB_MAX];
+    for(int jloc=0; jloc < iloc; jloc++) {
       int j    = sys->my_atom_list[jloc];
 
-      if (iloc > jloc) continue;
+      if (iloc >= jloc) continue;
       double rx    = pbc(sys->coordinates[i] -
                          sys->coordinates[j], 0.5*sys->box);
       double ry    = pbc(sys->coordinates[i + sys->all_atoms] -
@@ -203,6 +197,7 @@ static void force_ngb(mdsys_t *sys)
                          0.5*sys->box);
       double r  = sqrt(rx*rx + ry*ry + rz*rz);
 
+      if (r > sys->rcut) continue;
       double ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r +
                                            6*pow(sys->sigma/r,6.0)/r);
       epot += 4.0*sys->epsilon*(pow(sys->sigma/r,12.0) -
@@ -214,9 +209,9 @@ static void force_ngb(mdsys_t *sys)
       sys->fy[jloc] -= ry/r*ffac;
       sys->fz[jloc] -= rz/r*ffac;
     }
+
     // Iterates through all ghost atoms.
-    for(int ingb = sys->ngb_loc[iloc]; ingb < sys->n_ngb[iloc]; ingb++) {
-      int jloc = sys->ngb_list[ingb + iloc*NGB_MAX];
+    for(int jloc = 0 ; jloc < sys->ghost_atoms; jloc++) {
       int j    = sys->ghost_atom_list[jloc];
       double rx    = pbc(sys->coordinates[i] -
                          sys->coordinates[j], 0.5*sys->box);
@@ -228,6 +223,7 @@ static void force_ngb(mdsys_t *sys)
                          0.5*sys->box);
       double r = sqrt(rx*rx + ry*ry + rz*rz);
 
+      if (r > sys->rcut) continue;
       double ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r +
                                            6*pow(sys->sigma/r,6.0)/r);
       epot += 0.5*4.0*sys->epsilon*(pow(sys->sigma/r,12.0) -
@@ -239,56 +235,6 @@ static void force_ngb(mdsys_t *sys)
   }
 
   sys->epot = epot;
-  return;
-}
-
-/* Create Neighbour list using cutoff */
-void make_ngb_list(mdsys_t *sys)
-{
-  azzero_i(sys->ngb_loc, sys->my_atoms);
-  azzero_i(sys->n_ngb  , sys->my_atoms);
-  for(int i=0; i < sys->my_atoms; i++) {
-    int my_id = sys->my_atom_list[i];
-    for(int j = i+1; j < sys->my_atoms; j++) {
-
-      int atom_id  = sys->my_atom_list[j];
-      double rx    = pbc(sys->coordinates[my_id] -
-                         sys->coordinates[atom_id], 0.5*sys->box);
-      double ry    = pbc(sys->coordinates[my_id + sys->all_atoms] -
-                         sys->coordinates[atom_id + sys->all_atoms],
-                         0.5*sys->box);
-      double rz    = pbc(sys->coordinates[my_id + 2*(sys->all_atoms)] -
-                         sys->coordinates[atom_id + 2*(sys->all_atoms)],
-                         0.5*sys->box);
-      double r     = sqrt(rx*rx + ry*ry + rz*rz);
-      if (r < sys->rcut) {
-        sys->ngb_list[i*NGB_MAX + sys->n_ngb[i]] = j;
-        sys->ngb_list[j*NGB_MAX + sys->n_ngb[j]] = i;
-        sys->n_ngb[i]++;
-        sys->n_ngb[j]++;
-        sys->ngb_loc[i]++;
-        sys->ngb_loc[j]++;
-      }
-    }
-
-    for(int j=0; j < sys->ghost_atoms; j++) {
-      int atom_id  = sys->ghost_atom_list[j];
-      double rx    = pbc(sys->coordinates[my_id] -
-                         sys->coordinates[atom_id], 0.5*sys->box);
-      double ry    = pbc(sys->coordinates[my_id + sys->all_atoms] -
-                         sys->coordinates[atom_id + sys->all_atoms],
-                         0.5*sys->box);
-      double rz    = pbc(sys->coordinates[my_id + 2*(sys->all_atoms)] -
-                         sys->coordinates[atom_id + 2*(sys->all_atoms)],
-                         0.5*sys->box);
-      double r     = sqrt(rx*rx + ry*ry + rz*rz);
-
-      if (r < sys->rcut) {
-        sys->ngb_list[i*NGB_MAX + sys->n_ngb[i]] = j;
-        sys->n_ngb[i]++;
-      }
-    }
-  }
   return;
 }
 
@@ -430,12 +376,6 @@ static void velverlet(mdsys_t *sys, allgv_t *allgv_data)
 
   if (sys->my_rank == 0)  {
     timer_pause("Coordinate Messaging");
-    timer_start("Neighbour List");
-  }
-  make_ngb_list(sys);
-
-  if (sys->my_rank == 0) {
-    timer_pause("Neighbour List");
     timer_start("Force Calculation");
   }
   /* compute forces and potential energy */
@@ -583,14 +523,10 @@ int main(int argc, char **argv)
   sys.fx      = (double *)malloc(sys.my_atoms*sizeof(double));
   sys.fy      = (double *)malloc(sys.my_atoms*sizeof(double));
   sys.fz      = (double *)malloc(sys.my_atoms*sizeof(double));
-  sys.n_ngb   =     (int*)malloc(sys.my_atoms*sizeof(int));
-  sys.ngb_loc =     (int*)malloc(sys.my_atoms*sizeof(int));
-  sys.ngb_list=     (int*)malloc(sys.my_atoms*NGB_MAX*sizeof(int));
 
   azzero(sys.fx, sys.my_atoms);
   azzero(sys.fy, sys.my_atoms);
   azzero(sys.fz, sys.my_atoms);
-  azzero_i(sys.ngb_list, sys.my_atoms*NGB_MAX);
 
   // Creates datatypes for MPI_AllgatherV
   allgv_t allgv_data;
@@ -598,7 +534,6 @@ int main(int argc, char **argv)
 
   // Initializes forces, energies and outputs.
   sys.nfi=0;
-  make_ngb_list(&sys);
   force_ngb(&sys);
   ekin(&sys);
 
@@ -662,9 +597,6 @@ int main(int argc, char **argv)
   free(sys.fx);
   free(sys.fy);
   free(sys.fz);
-  free(sys.n_ngb);
-  free(sys.ngb_loc);
-  free(sys.ngb_list);
   free(allgv_data.recvbuf);
   free(allgv_data.sendbuf);
   free(allgv_data.recvcounts);

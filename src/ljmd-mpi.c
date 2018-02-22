@@ -302,21 +302,24 @@ static void ALLGV_setup(mdsys_t *sys, allgv_t *allgv_data) {
 
   allgv_data->displs[0] = 0;
   if (sys->task_rest > 0) {
+    int accum_count = 0;
     for (int t = 0; t < sys->task_rest; t++) {
       allgv_data->recvcounts[t] = 3*sys->atom_count_L;
-      allgv_data->displs[t +1] += allgv_data->recvcounts[t];
+      accum_count              += allgv_data->recvcounts[t];
+      allgv_data->displs[t+1]   = accum_count;
     }
     for (int t = sys->task_rest; t < sys->n_tasks -1; t++) {
       allgv_data->recvcounts[t] = 3*sys->atom_count_S;
-      allgv_data->displs[t +1] += allgv_data->recvcounts[t];
+      accum_count              += allgv_data->recvcounts[t];
+      allgv_data->displs[t+1]   = accum_count;
     }
-    allgv_data->recvcounts[sys->n_tasks - 1] = 3*sys->atom_count_S;
   } else {
+    int accum_count = 0;
     for (int t = 0; t < sys->n_tasks -1; t++) {
       allgv_data->recvcounts[t] = 3*sys->atom_count_S;
-      allgv_data->displs[t +1] += allgv_data->recvcounts[t];
+      accum_count              += allgv_data->recvcounts[t];
+      allgv_data->displs[t+1]   = accum_count;
     }
-    allgv_data->displs[sys->n_tasks - 1] = 3*sys->atom_count_S;
   }
   allgv_data->recvcounts[sys->n_tasks - 1] = 3*sys->atom_count_S;
 }
@@ -342,51 +345,64 @@ static void update_coords(mdsys_t *sys, allgv_t *allgv_data)
   MPI_Allgatherv((void*)allgv_data->sendbuf, sys->my_atoms*3, MPI_DOUBLE,
                  (void*)allgv_data->recvbuf, allgv_data->recvcounts,
                  allgv_data->displs, MPI_DOUBLE, MPI_COMM_WORLD);
-
   // Copies coordinates from coordinate buffer.
   if (sys->task_rest > 0) {
     int offset = 0;
+    int index_a = 0, index_b = 0;
     for (int t = 0; t < sys->task_rest; t++) {
       for (int i = 0; i < sys->atom_count_L; i++) {
-        sys->coordinates[i] = allgv_data->recvbuf[i + offset];
+        index_a = i + t*sys->atom_count_L;
+        index_b = i + offset;
+        sys->coordinates[index_a] = allgv_data->recvbuf[index_b];
       }
       for (int i = 0; i < sys->atom_count_L; i++) {
-        sys->coordinates[i + sys->atom_count_L] =
-                        allgv_data->recvbuf[i + offset + sys->atom_count_L];
+        index_a = i + t*sys->atom_count_L + sys->all_atoms;
+        index_b = i + offset + sys->atom_count_L;
+        sys->coordinates[index_a] = allgv_data->recvbuf[index_b];
       }
       for (int i = 0; i < sys->atom_count_L; i++) {
-        sys->coordinates[i + 2*(sys->atom_count_L)] =
-                        allgv_data->recvbuf[i + offset + 2*(sys->atom_count_L)];
+        index_a = i + t*sys->atom_count_L + 2*sys->all_atoms;
+        index_b = i + offset + 2*(sys->atom_count_L);
+        sys->coordinates[index_a] = allgv_data->recvbuf[index_b];
       }
       offset += 3*sys->atom_count_L;
     }
     for (int t = sys->task_rest; t < sys->n_tasks; t++) {
       for (int i = 0; i < sys->atom_count_S; i++) {
-        sys->coordinates[i] = allgv_data->recvbuf[i + offset];
+        index_a = i + sys->task_rest + t*sys->atom_count_S;
+        index_b = i + offset;
+        sys->coordinates[index_a] = allgv_data->recvbuf[index_b];
       }
       for (int i = 0; i < sys->atom_count_S; i++) {
-        sys->coordinates[i + sys->atom_count_S] =
-                        allgv_data->recvbuf[i + offset + sys->atom_count_S];
+        index_a = i + sys->task_rest + t*sys->atom_count_S + sys->all_atoms;
+        index_b = i + offset + sys->atom_count_S;
+        sys->coordinates[index_a] = allgv_data->recvbuf[index_b];
       }
       for (int i = 0; i < sys->atom_count_S; i++) {
-        sys->coordinates[i + 2*(sys->atom_count_S)] =
-                        allgv_data->recvbuf[i + offset + 2*(sys->atom_count_S)];
+        index_a = i + sys->task_rest + t*sys->atom_count_S + 2*sys->all_atoms;
+        index_b = i + offset + 2*(sys->atom_count_S);
+        sys->coordinates[index_a] = allgv_data->recvbuf[index_b];
       }
       offset += 3*sys->atom_count_S;
     }
   } else {
     int offset = 0;
+    int index_a = 0, index_b = 0;
     for (int t = 0; t < sys->n_tasks; t++) {
       for (int i = 0; i < sys->atom_count_S; i++) {
-        sys->coordinates[i + t*sys->atom_count_S] = allgv_data->recvbuf[i + offset];
+        index_a = i + t*sys->atom_count_S;
+        index_b = i + offset;
+        sys->coordinates[index_a] = allgv_data->recvbuf[index_b];
       }
       for (int i = 0; i < sys->atom_count_S; i++) {
-        sys->coordinates[i + t*sys->atom_count_S + sys->all_atoms] =
-                        allgv_data->recvbuf[i + offset + sys->atom_count_S];
+        index_a = i + t*sys->atom_count_S + sys->all_atoms;
+        index_b = i + offset + sys->atom_count_S;
+        sys->coordinates[index_a] = allgv_data->recvbuf[index_b];
       }
       for (int i = 0; i < sys->atom_count_S; i++) {
-        sys->coordinates[i + t*sys->atom_count_S + 2*sys->all_atoms] =
-                        allgv_data->recvbuf[i + offset + 2*(sys->atom_count_S)];
+        index_a = i + t*sys->atom_count_S + 2*sys->all_atoms;
+        index_b = i + offset + 2*(sys->atom_count_S);
+        sys->coordinates[index_a] = allgv_data->recvbuf[index_b];
       }
       offset += 3*sys->atom_count_S;
     }
@@ -592,7 +608,7 @@ int main(int argc, char **argv)
     MPI_Reduce(MPI_IN_PLACE, (void*) &sys.ekin, 1, MPI_DOUBLE, MPI_SUM, 0,
                MPI_COMM_WORLD);
     erg=fopen(ergfile,"w");
-    traj=fopen(trajfile,"w");
+    //traj=fopen(trajfile,"w");
 
     printf("Starting simulation with %d atoms for %d steps.\n",sys.natoms, sys.nsteps);
     printf("     NFI            TEMP            EKIN                 EPOT              ETOT\n");

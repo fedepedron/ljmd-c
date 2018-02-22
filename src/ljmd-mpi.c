@@ -179,14 +179,12 @@ static void force_ngb(mdsys_t *sys)
   azzero(sys->fz,sys->my_atoms);
 
   double epot = 0.0;
-
   for(int iloc=0; iloc < sys->my_atoms; iloc++) {
     int i = sys->my_atom_list[iloc];
     // Iterates through all local atoms.
     for(int jloc=0; jloc < iloc; jloc++) {
       int j    = sys->my_atom_list[jloc];
 
-      if (iloc >= jloc) continue;
       double rx    = pbc(sys->coordinates[i] -
                          sys->coordinates[j], 0.5*sys->box);
       double ry    = pbc(sys->coordinates[i + sys->all_atoms] -
@@ -197,19 +195,19 @@ static void force_ngb(mdsys_t *sys)
                          0.5*sys->box);
       double r  = sqrt(rx*rx + ry*ry + rz*rz);
 
-      if (r > sys->rcut) continue;
-      double ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r +
-                                           6*pow(sys->sigma/r,6.0)/r);
-      epot += 4.0*sys->epsilon*(pow(sys->sigma/r,12.0) -
-                                pow(sys->sigma/r,6.0));
-      sys->fx[iloc] += rx/r*ffac;
-      sys->fy[iloc] += ry/r*ffac;
-      sys->fz[iloc] += rz/r*ffac;
-      sys->fx[jloc] -= rx/r*ffac;
-      sys->fy[jloc] -= ry/r*ffac;
-      sys->fz[jloc] -= rz/r*ffac;
+      if (r < sys->rcut) {
+        double ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r +
+                                             6*pow(sys->sigma/r,6.0)/r);
+        epot += 4.0*sys->epsilon*(pow(sys->sigma/r,12.0) -
+                                  pow(sys->sigma/r,6.0));
+        sys->fx[iloc] += rx/r*ffac;
+        sys->fy[iloc] += ry/r*ffac;
+        sys->fz[iloc] += rz/r*ffac;
+        sys->fx[jloc] -= rx/r*ffac;
+        sys->fy[jloc] -= ry/r*ffac;
+        sys->fz[jloc] -= rz/r*ffac;
+      }
     }
-
     // Iterates through all ghost atoms.
     for(int jloc = 0 ; jloc < sys->ghost_atoms; jloc++) {
       int j    = sys->ghost_atom_list[jloc];
@@ -223,14 +221,15 @@ static void force_ngb(mdsys_t *sys)
                          0.5*sys->box);
       double r = sqrt(rx*rx + ry*ry + rz*rz);
 
-      if (r > sys->rcut) continue;
-      double ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r +
-                                           6*pow(sys->sigma/r,6.0)/r);
-      epot += 0.5*4.0*sys->epsilon*(pow(sys->sigma/r,12.0) -
-                                    pow(sys->sigma/r,6.0));
-      sys->fx[iloc] += rx/r*ffac;
-      sys->fy[iloc] += ry/r*ffac;
-      sys->fz[iloc] += rz/r*ffac;
+      if (r < sys->rcut) {
+        double ffac = -4.0*sys->epsilon*(-12.0*pow(sys->sigma/r,12.0)/r +
+                                             6*pow(sys->sigma/r,6.0)/r);
+        epot += 0.5*4.0*sys->epsilon*(pow(sys->sigma/r,12.0) -
+                                      pow(sys->sigma/r,6.0));
+        sys->fx[iloc] += rx/r*ffac;
+        sys->fy[iloc] += ry/r*ffac;
+        sys->fz[iloc] += rz/r*ffac;
+      }
     }
   }
 
@@ -538,10 +537,12 @@ int main(int argc, char **argv)
   ekin(&sys);
 
   if (sys.my_rank == 0) {
-    MPI_Reduce(MPI_IN_PLACE, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
-               MPI_COMM_WORLD);
-    MPI_Reduce(MPI_IN_PLACE, (void*) &sys.ekin, 1, MPI_DOUBLE, MPI_SUM, 0,
-               MPI_COMM_WORLD);
+    if (sys.n_tasks > 1) {
+      MPI_Reduce(MPI_IN_PLACE, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
+                 MPI_COMM_WORLD);
+      MPI_Reduce(MPI_IN_PLACE, (void*) &sys.ekin, 1, MPI_DOUBLE, MPI_SUM, 0,
+                 MPI_COMM_WORLD);
+    }
     erg=fopen(ergfile,"w");
     //traj=fopen(trajfile,"w");
 
@@ -560,10 +561,12 @@ int main(int argc, char **argv)
     if ((sys.nfi % sys.nprint) == 0) {
       if (sys.my_rank == 0) {
         timer_start("Output Writing");
-        MPI_Reduce(MPI_IN_PLACE, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
-                   MPI_COMM_WORLD);
-        MPI_Reduce(MPI_IN_PLACE, (void*) &sys.ekin, 1, MPI_DOUBLE, MPI_SUM, 0,
-                   MPI_COMM_WORLD);
+        if (sys.n_tasks > 1) {
+          MPI_Reduce(MPI_IN_PLACE, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
+                     MPI_COMM_WORLD);
+          MPI_Reduce(MPI_IN_PLACE, (void*) &sys.ekin, 1, MPI_DOUBLE, MPI_SUM, 0,
+                     MPI_COMM_WORLD);
+        }
         output(&sys, erg, traj, trajfile);
         timer_pause("Output Writing");
       } else {

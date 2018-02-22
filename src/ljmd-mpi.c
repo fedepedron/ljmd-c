@@ -10,9 +10,10 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <math.h>
-#include "timers.h"
-#include "ncdf.h"
 #include <mpi.h>
+#include "timers.h"
+#include "md_utils.h"
+#include "md_io.h"
 
 /* generic file- or pathname buffer length */
 #define BLEN 200
@@ -24,102 +25,11 @@ const double mvsq2e=2390.05736153349; /* m*v^2 in kcal/mol */
 
 /* structure to hold the complete information
  * about the MD system */
-struct _mdsys {
-  int natoms, nfi, nsteps;
-  int nprint;
-  double dt, mass, epsilon, sigma, box, rcut;
-  double ekin, epot, temp;
-  double *rx, *ry, *rz; // These are only used in input read.
-  double *vx, *vy, *vz;
-  double *fx, *fy, *fz;
-  double *coordinates;  // XYZ coordinates for each atom.
 
-  int *n_ngb;           // Number of total neighbours
-  int *ngb_loc;         // Number of neighbours that are not ghosts.
-  int *ngb_list;        // List of original IDs of neighbours.
-
-  int my_atoms;         // N° of atoms in current task.
-  int ghost_atoms;      // N° of ghost atoms in current task.
-  int all_atoms;        // my_atoms + ghost_atoms;
-  int *my_atom_list;    // List of original IDs of atoms in current task.
-  int *ghost_atom_list; // List of original IDs of ghost atoms in current task.
-  int atom_count_L;     // N° of atoms in tasks with id > natoms%ntasks.
-  int atom_count_S;     // N° of atoms in tasks with id < natoms%ntasks.
-
-  int my_rank;
-  int n_tasks;
-  int task_rest;        // Equals to natoms%ntasks.
-};
-typedef struct _mdsys mdsys_t;
-
-struct __attribute__((packed)) _mdsysb {
-  int    natoms, nsteps, nprint;
-  double dt, mass, epsilon, sigma, box, rcut;
-};
-typedef struct _mdsysb mdsys_inp_t;
-
-struct _ALLGV_struct {
-  double *sendbuf;
-  double *recvbuf;
-  int    *recvcounts;
-  int    *displs;
-};
-typedef struct _ALLGV_struct allgv_t;
 
 //##############################################################################
 // HELPER FUNCTIONS
-// Read a line and then return the first string with whitespace stripped off.
-static int get_a_line(FILE *fp, char *buf)
-{
-    char tmp[BLEN], *ptr;
 
-    /* read a line and cut of comments and blanks */
-    if (fgets(tmp,BLEN,fp)) {
-        int i;
-
-        ptr=strchr(tmp,'#');
-        if (ptr) *ptr= '\0';
-        i=strlen(tmp); --i;
-        while(isspace(tmp[i])) {
-            tmp[i]='\0';
-            --i;
-        }
-        ptr=tmp;
-        while(isspace(*ptr)) {++ptr;}
-        i=strlen(ptr);
-        strcpy(buf,tmp);
-        return 0;
-    } else {
-        perror("problem reading input");
-        return -1;
-    }
-    return 0;
-}
-
-// These zero arrays of int and double.
-static void azzero(double *d, const int n)
-{
-    int i;
-    for (i=0; i<n; ++i) {
-        d[i]=0.0;
-    }
-}
-
-static void azzero_i(int *a, const int n)
-{
-    int i;
-    for (i=0; i<n; ++i) {
-        a[i]=0.0;
-    }
-}
-
-// Apply minimum image convention
-static double pbc(double x, const double boxby2)
-{
-    while (x >  boxby2) x -= 2.0*boxby2;
-    while (x < -boxby2) x += 2.0*boxby2;
-    return x;
-}
 
 //##############################################################################
 // MAIN SUBS
@@ -260,8 +170,8 @@ void make_ngb_list(mdsys_t *sys)
       double rz    = pbc(sys->coordinates[my_id + 2*(sys->all_atoms)] -
                          sys->coordinates[atom_id + 2*(sys->all_atoms)],
                          0.5*sys->box);
-      double r     = sqrt(rx*rx + ry*ry + rz*rz);
-      if (r < sys->rcut) {
+      double r     = rx*rx + ry*ry + rz*rz;
+      if (r < (sys->rcut * sys->rcut)) {
         sys->ngb_list[i*NGB_MAX + sys->n_ngb[i]] = j;
         sys->ngb_list[j*NGB_MAX + sys->n_ngb[j]] = i;
         sys->n_ngb[i]++;
@@ -281,47 +191,15 @@ void make_ngb_list(mdsys_t *sys)
       double rz    = pbc(sys->coordinates[my_id + 2*(sys->all_atoms)] -
                          sys->coordinates[atom_id + 2*(sys->all_atoms)],
                          0.5*sys->box);
-      double r     = sqrt(rx*rx + ry*ry + rz*rz);
+      double r     = rx*rx + ry*ry + rz*rz;
 
-      if (r < sys->rcut) {
+      if (r < (sys->rcut * sys->rcut)) {
         sys->ngb_list[i*NGB_MAX + sys->n_ngb[i]] = j;
         sys->n_ngb[i]++;
       }
     }
   }
   return;
-}
-
-// Sets up the arrays for MPI_AllgatherV.
-static void ALLGV_setup(mdsys_t *sys, allgv_t *allgv_data) {
-
-  allgv_data->sendbuf   = (double *)malloc(sys->my_atoms *sizeof(double)*3);
-  allgv_data->recvbuf   = (double *)malloc(sys->all_atoms*sizeof(double)*3);
-  allgv_data->recvcounts=    (int *)malloc(sys->n_tasks  *sizeof(int));
-  allgv_data->displs    =    (int *)malloc(sys->n_tasks  *sizeof(int));
-
-  allgv_data->displs[0] = 0;
-  if (sys->task_rest > 0) {
-    int accum_count = 0;
-    for (int t = 0; t < sys->task_rest; t++) {
-      allgv_data->recvcounts[t] = 3*sys->atom_count_L;
-      accum_count              += allgv_data->recvcounts[t];
-      allgv_data->displs[t+1]   = accum_count;
-    }
-    for (int t = sys->task_rest; t < sys->n_tasks -1; t++) {
-      allgv_data->recvcounts[t] = 3*sys->atom_count_S;
-      accum_count              += allgv_data->recvcounts[t];
-      allgv_data->displs[t+1]   = accum_count;
-    }
-  } else {
-    int accum_count = 0;
-    for (int t = 0; t < sys->n_tasks -1; t++) {
-      allgv_data->recvcounts[t] = 3*sys->atom_count_S;
-      accum_count              += allgv_data->recvcounts[t];
-      allgv_data->displs[t+1]   = accum_count;
-    }
-  }
-  allgv_data->recvcounts[sys->n_tasks - 1] = 3*sys->atom_count_S;
 }
 
 static void update_coords(mdsys_t *sys, allgv_t *allgv_data)
@@ -407,9 +285,7 @@ static void update_coords(mdsys_t *sys, allgv_t *allgv_data)
       offset += 3*sys->atom_count_S;
     }
   }
-
 }
-
 
 /* velocity verlet */
 static void velverlet(mdsys_t *sys, allgv_t *allgv_data)
@@ -432,8 +308,7 @@ static void velverlet(mdsys_t *sys, allgv_t *allgv_data)
     timer_pause("Coordinate Messaging");
     timer_start("Neighbour List");
   }
-  make_ngb_list(sys);
-
+  if ((sys->nfi % sys->ngb_freq) == 0 ) make_ngb_list(sys);
   if (sys->my_rank == 0) {
     timer_pause("Neighbour List");
     timer_start("Force Calculation");
@@ -449,15 +324,6 @@ static void velverlet(mdsys_t *sys, allgv_t *allgv_data)
     sys->vy[i] += 0.5*sys->dt / mvsq2e * sys->fy[id] / sys->mass;
     sys->vz[i] += 0.5*sys->dt / mvsq2e * sys->fz[id] / sys->mass;
   }
-}/* append data to output. */
-static void output(mdsys_t *sys, FILE *erg, FILE *traj, char* trajfile)
-{
-  printf("% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp,
-         sys->ekin, sys->epot, sys->ekin+sys->epot);
-  fprintf(erg,"% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp,
-          sys->ekin, sys->epot, sys->ekin+sys->epot);
-  // Print trajectory using NetCDF format.
-  write_to_netcdf(sys->rx, sys->ry, sys->rz, sys->natoms, trajfile);
 }
 
 //##############################################################################
@@ -602,41 +468,16 @@ int main(int argc, char **argv)
   force_ngb(&sys);
   ekin(&sys);
 
-  if (sys.my_rank == 0) {
-    MPI_Reduce(MPI_IN_PLACE, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
-               MPI_COMM_WORLD);
-    MPI_Reduce(MPI_IN_PLACE, (void*) &sys.ekin, 1, MPI_DOUBLE, MPI_SUM, 0,
-               MPI_COMM_WORLD);
-    erg=fopen(ergfile,"w");
-    //traj=fopen(trajfile,"w");
-
-    printf("Starting simulation with %d atoms for %d steps.\n",sys.natoms, sys.nsteps);
-    printf("     NFI            TEMP            EKIN                 EPOT              ETOT\n");
-    output(&sys, erg, traj, trajfile);
-  } else {
-    MPI_Reduce((void*) &sys.epot, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
-               MPI_COMM_WORLD);
-    MPI_Reduce((void*) &sys.ekin, (void*) &sys.ekin, 1, MPI_DOUBLE, MPI_SUM, 0,
-               MPI_COMM_WORLD);
-  }
+  erg=fopen(ergfile,"w");
+  traj=fopen(trajfile,"w");
+  write_initial_output(&sys, erg, traj);
 
   // MAIN LOOP
   for(sys.nfi=1; sys.nfi <= sys.nsteps; sys.nfi++) {
     if ((sys.nfi % sys.nprint) == 0) {
-      if (sys.my_rank == 0) {
-        timer_start("Output Writing");
-        MPI_Reduce(MPI_IN_PLACE, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
-                   MPI_COMM_WORLD);
-        MPI_Reduce(MPI_IN_PLACE, (void*) &sys.ekin, 1, MPI_DOUBLE, MPI_SUM, 0,
-                   MPI_COMM_WORLD);
-        output(&sys, erg, traj, trajfile);
-        timer_pause("Output Writing");
-      } else {
-        MPI_Reduce((void*) &sys.epot, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
-                   MPI_COMM_WORLD);
-        MPI_Reduce((void*) &sys.ekin, (void*) &sys.ekin, 1, MPI_DOUBLE, MPI_SUM, 0,
-                   MPI_COMM_WORLD);
-      }
+      if (sys.my_rank == 0) timer_start("Output Writing");
+      write_output(&sys, erg, traj);
+      if (sys.my_rank == 0) timer_pause("Output Writing");
     }
     if (sys.my_rank == 0) timer_start("Verlet Propagation");
     velverlet(&sys, &allgv_data);
@@ -647,7 +488,6 @@ int main(int argc, char **argv)
     }
     ekin(&sys);
     if (sys.my_rank == 0)  timer_pause("Energy Calculation");
-
   }
 
   /* clean up: close files, free memory */

@@ -5,7 +5,7 @@ CFLAGS=-Wall -g -O3 -ffast-math -fomit-frame-pointer -lnetcdf -std=c++11 -fopenm
 LDLIBS=-lm -lnetcdf
 
 # list of source files
-SRC=ljmd-mpi.c timers.c ncdf.c
+SRC=ljmd-mpi.c timers.c md_utils.c md_io.c
 VPATH=../src
 OBJ=$(SRC:%.c=%.o)
 
@@ -23,6 +23,8 @@ clean:
 	$(CC) -c $(CFLAGS) $<
 
 # dependencies
-ncdf.o: ncdf.c ncdf.h
-timers.o: timers.c timers.h
-ljmd.o: ljmd.c timers.h
+
+timers.o: timers.h timers.c
+md_utils.o: md_utils.h md_utils.c
+md_io.o: md_io.h md_utils.h md_io.c
+ljmd.o: timers.h md_io.h md_utils.h ljmd.c

@@ -1,3 +1,5 @@
+#ifndef __TIMERH__
+#define __TIMERH__
 #include <map>
 #include <string>
 #include <cstdio>
@@ -7,3 +9,4 @@ extern void timer_start(std::string name);
 extern void timer_pause(std::string name);
 extern void timer_stop(std::string name);
 extern void print_timers();
+#endif

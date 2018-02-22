@@ -58,6 +58,14 @@ struct __attribute__((packed)) _mdsysb {
 };
 typedef struct _mdsysb mdsys_inp_t;
 
+struct _ALLGV_struct {
+  double *sendbuf;
+  double *recvbuf;
+  int    *recvcounts;
+  int    *displs;
+};
+typedef struct _ALLGV_struct allgv_t;
+
 //##############################################################################
 // HELPER FUNCTIONS
 // Read a line and then return the first string with whitespace stripped off.
@@ -206,7 +214,6 @@ static void force_ngb(mdsys_t *sys)
       sys->fy[jloc] -= sys->fy[iloc];
       sys->fz[jloc] -= sys->fz[iloc];
     }
-    if ((sys->my_rank == 0) && iloc < 1) printf("Energy %10.6f\n", epot);
     // Iterates through all ghost atoms.
     for(int ingb = sys->ngb_loc[iloc]; ingb < sys->n_ngb[iloc]; ingb++) {
       int jloc = sys->ngb_list[ingb + iloc*NGB_MAX];
@@ -229,7 +236,6 @@ static void force_ngb(mdsys_t *sys)
       sys->fy[iloc] += ry/r*ffac;
       sys->fz[iloc] += rz/r*ffac;
     }
-    if ((sys->my_rank == 0) && iloc < 1) printf("Energy %10.6f\n", epot);
   }
 
   sys->epot = epot;
@@ -286,48 +292,148 @@ void make_ngb_list(mdsys_t *sys)
   return;
 }
 
-static void task_update_coords(mdsys_t *sys)
+// Sets up the arrays for MPI_AllgatherV.
+static void ALLGV_setup(mdsys_t *sys, allgv_t *allgv_data) {
+
+  allgv_data->sendbuf   = (double *)malloc(sys->my_atoms *sizeof(double)*3);
+  allgv_data->recvbuf   = (double *)malloc(sys->all_atoms*sizeof(double)*3);
+  allgv_data->recvcounts=    (int *)malloc(sys->n_tasks  *sizeof(int));
+  allgv_data->displs    =    (int *)malloc(sys->n_tasks  *sizeof(int));
+
+  allgv_data->displs[0] = 0;
+  if (sys->task_rest > 0) {
+    for (int t = 0; t < sys->task_rest; t++) {
+      allgv_data->recvcounts[t] = 3*sys->atom_count_L;
+      allgv_data->displs[t +1] += allgv_data->recvcounts[t];
+    }
+    for (int t = sys->task_rest; t < sys->n_tasks -1; t++) {
+      allgv_data->recvcounts[t] = 3*sys->atom_count_S;
+      allgv_data->displs[t +1] += allgv_data->recvcounts[t];
+    }
+    allgv_data->recvcounts[sys->n_tasks - 1] = 3*sys->atom_count_S;
+  } else {
+    for (int t = 0; t < sys->n_tasks -1; t++) {
+      allgv_data->recvcounts[t] = 3*sys->atom_count_S;
+      allgv_data->displs[t +1] += allgv_data->recvcounts[t];
+    }
+    allgv_data->displs[sys->n_tasks - 1] = 3*sys->atom_count_S;
+  }
+  allgv_data->recvcounts[sys->n_tasks - 1] = 3*sys->atom_count_S;
+}
+
+static void update_coords(mdsys_t *sys, allgv_t *allgv_data)
 {
+  int i;
+  for (int id = 0; id < sys->my_atoms; id++) {
+    i = sys->my_atom_list[id];
+    allgv_data->sendbuf[id] = sys->coordinates[i];
+  }
+  for (int id = 0; id < sys->my_atoms; id++) {
+    i = sys->my_atom_list[id];
+    allgv_data->sendbuf[id + sys->my_atoms] =
+                                      sys->coordinates[i + sys->all_atoms];
+  }
+  for (int id = 0; id < sys->my_atoms; id++) {
+    i = sys->my_atom_list[id];
+    allgv_data->sendbuf[id + (sys->my_atoms)*2] =
+                                      sys->coordinates[i + (sys->all_atoms)*2];
+  }
+
+  MPI_Allgatherv((void*)allgv_data->sendbuf, sys->my_atoms*3, MPI_DOUBLE,
+                 (void*)allgv_data->recvbuf, allgv_data->recvcounts,
+                 allgv_data->displs, MPI_DOUBLE, MPI_COMM_WORLD);
+
+  // Copies coordinates from coordinate buffer.
+  if (sys->task_rest > 0) {
+    int offset = 0;
+    for (int t = 0; t < sys->task_rest; t++) {
+      for (int i = 0; i < sys->atom_count_L; i++) {
+        sys->coordinates[i] = allgv_data->recvbuf[i + offset];
+      }
+      for (int i = 0; i < sys->atom_count_L; i++) {
+        sys->coordinates[i + sys->atom_count_L] =
+                        allgv_data->recvbuf[i + offset + sys->atom_count_L];
+      }
+      for (int i = 0; i < sys->atom_count_L; i++) {
+        sys->coordinates[i + 2*(sys->atom_count_L)] =
+                        allgv_data->recvbuf[i + offset + 2*(sys->atom_count_L)];
+      }
+      offset += 3*sys->atom_count_L;
+    }
+    for (int t = sys->task_rest; t < sys->n_tasks; t++) {
+      for (int i = 0; i < sys->atom_count_S; i++) {
+        sys->coordinates[i] = allgv_data->recvbuf[i + offset];
+      }
+      for (int i = 0; i < sys->atom_count_S; i++) {
+        sys->coordinates[i + sys->atom_count_S] =
+                        allgv_data->recvbuf[i + offset + sys->atom_count_S];
+      }
+      for (int i = 0; i < sys->atom_count_S; i++) {
+        sys->coordinates[i + 2*(sys->atom_count_S)] =
+                        allgv_data->recvbuf[i + offset + 2*(sys->atom_count_S)];
+      }
+      offset += 3*sys->atom_count_S;
+    }
+  } else {
+    int offset = 0;
+    for (int t = 0; t < sys->n_tasks; t++) {
+      for (int i = 0; i < sys->atom_count_S; i++) {
+        sys->coordinates[i + t*sys->atom_count_S] = allgv_data->recvbuf[i + offset];
+      }
+      for (int i = 0; i < sys->atom_count_S; i++) {
+        sys->coordinates[i + t*sys->atom_count_S + sys->all_atoms] =
+                        allgv_data->recvbuf[i + offset + sys->atom_count_S];
+      }
+      for (int i = 0; i < sys->atom_count_S; i++) {
+        sys->coordinates[i + t*sys->atom_count_S + 2*sys->all_atoms] =
+                        allgv_data->recvbuf[i + offset + 2*(sys->atom_count_S)];
+      }
+      offset += 3*sys->atom_count_S;
+    }
+  }
 
 }
 
 
 /* velocity verlet */
-static void velverlet(mdsys_t *sys)
+static void velverlet(mdsys_t *sys, allgv_t *allgv_data)
 {
   /* first part: propagate velocities by half and positions by full step */
   for (int id=0; id<sys->my_atoms; ++id) {
     int i = sys->my_atom_list[id];
-    sys->vx[i] += 0.5*sys->dt / mvsq2e * sys->fx[i] / sys->mass;
-    sys->vy[i] += 0.5*sys->dt / mvsq2e * sys->fy[i] / sys->mass;
-    sys->vz[i] += 0.5*sys->dt / mvsq2e * sys->fz[i] / sys->mass;
-    sys->coordinates[i] += sys->dt*sys->vx[i];
-    sys->coordinates[i + sys->all_atoms] += sys->dt*sys->vy[i];
+    sys->vx[i] += 0.5*sys->dt / mvsq2e * sys->fx[id] / sys->mass;
+    sys->vy[i] += 0.5*sys->dt / mvsq2e * sys->fy[id] / sys->mass;
+    sys->vz[i] += 0.5*sys->dt / mvsq2e * sys->fz[id] / sys->mass;
+    sys->coordinates[i]                      += sys->dt*sys->vx[i];
+    sys->coordinates[i + sys->all_atoms]     += sys->dt*sys->vy[i];
     sys->coordinates[i + 2*(sys->all_atoms)] += sys->dt*sys->vz[i];
   }
 
-  /* compute forces and potential energy */
-  if (sys->my_rank == 0) timer_start("Neighbour List");
+  if (sys->my_rank == 0)  timer_start("Coordinate Messaging");
+  update_coords(sys, allgv_data);
+
+  if (sys->my_rank == 0)  {
+    timer_pause("Coordinate Messaging");
+    timer_start("Neighbour List");
+  }
   make_ngb_list(sys);
 
   if (sys->my_rank == 0) {
     timer_pause("Neighbour List");
     timer_start("Force Calculation");
   }
-
+  /* compute forces and potential energy */
   force_ngb(sys);
   if (sys->my_rank == 0) timer_pause("Force Calculation");
 
   /* second part: propagate velocities by another half step */
   for (int id=0; id<sys->my_atoms; ++id) {
     int i = sys->my_atom_list[id];
-    sys->vx[i] += 0.5*sys->dt / mvsq2e * sys->fx[i] / sys->mass;
-    sys->vy[i] += 0.5*sys->dt / mvsq2e * sys->fy[i] / sys->mass;
-    sys->vz[i] += 0.5*sys->dt / mvsq2e * sys->fz[i] / sys->mass;
+    sys->vx[i] += 0.5*sys->dt / mvsq2e * sys->fx[id] / sys->mass;
+    sys->vy[i] += 0.5*sys->dt / mvsq2e * sys->fy[id] / sys->mass;
+    sys->vz[i] += 0.5*sys->dt / mvsq2e * sys->fz[id] / sys->mass;
   }
-}
-
-/* append data to output. */
+}/* append data to output. */
 static void output(mdsys_t *sys, FILE *erg, FILE *traj, char* trajfile)
 {
   printf("% 8d % 20.8f % 20.8f % 20.8f % 20.8f\n", sys->nfi, sys->temp,
@@ -401,11 +507,6 @@ int main(int argc, char **argv)
   sys.nprint  = input_buffer.nprint;
   sys.dt      = input_buffer.dt;
 
-  if (sys.my_rank == 1) {
-    printf("HOLI %d %d %d  %12.2f %12.2f %12.2f %12.2f %12.2f %12.2f ",
-      sys.natoms, sys.nprint, sys.nsteps, sys.mass, sys.epsilon, sys.sigma,
-     sys.rcut, sys.box, sys.dt);
-  }
   // Creates local atom list and arrays.
   create_atom_list(&sys);
 
@@ -475,12 +576,16 @@ int main(int argc, char **argv)
   azzero(sys.fz, sys.my_atoms);
   azzero_i(sys.ngb_list, sys.my_atoms*sys.all_atoms);
 
+  // Creates datatypes for MPI_AllgatherV
+  allgv_t allgv_data;
+  ALLGV_setup(&sys, &allgv_data);
+
   // Initializes forces, energies and outputs.
   sys.nfi=0;
   make_ngb_list(&sys);
   force_ngb(&sys);
   ekin(&sys);
-  printf("My energy %10.6f \n",sys.epot );
+
   if (sys.my_rank == 0) {
     MPI_Reduce(MPI_IN_PLACE, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
                MPI_COMM_WORLD);
@@ -498,9 +603,8 @@ int main(int argc, char **argv)
     MPI_Reduce((void*) &sys.ekin, (void*) &sys.ekin, 1, MPI_DOUBLE, MPI_SUM, 0,
                MPI_COMM_WORLD);
   }
-  return 0;
+
   // MAIN LOOP
-  //timer_start("Main Loop");
   for(sys.nfi=1; sys.nfi <= sys.nsteps; sys.nfi++) {
     if ((sys.nfi % sys.nprint) == 0) {
       if (sys.my_rank == 0) {
@@ -511,6 +615,7 @@ int main(int argc, char **argv)
                    MPI_COMM_WORLD);
         output(&sys, erg, traj, trajfile);
         timer_pause("Output Writing");
+        timer_start("Verlet Propagation");
       } else {
         MPI_Reduce((void*) &sys.epot, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
                    MPI_COMM_WORLD);
@@ -518,27 +623,17 @@ int main(int argc, char **argv)
                    MPI_COMM_WORLD);
       }
     }
-    if (sys.my_rank == 0)  timer_start("Coordinate Messaging");
-    task_update_coords(&sys);
-
-    if (sys.my_rank == 0)  {
-      timer_pause("Coordinate Messaging");
-      timer_start("Verlet Propagation");
-    }
-
-    velverlet(&sys);
+    velverlet(&sys, &allgv_data);
 
     if (sys.my_rank == 0) {
      timer_pause("Verlet Propagation");
      timer_start("Energy Calculation");
     }
-
     ekin(&sys);
 
     if (sys.my_rank == 0)  timer_pause("Energy Calculation");
 
   }
-  //timer_stop("Main Loop");
 
   /* clean up: close files, free memory */
   printf("Simulation Done. Rank: %d.\n", sys.my_rank);
@@ -546,9 +641,6 @@ int main(int argc, char **argv)
   free(sys.my_atom_list);
   free(sys.ghost_atom_list);
   free(sys.coordinates);
-  free(sys.rx);
-  free(sys.ry);
-  free(sys.rz);
   free(sys.vx);
   free(sys.vy);
   free(sys.vz);
@@ -558,6 +650,10 @@ int main(int argc, char **argv)
   free(sys.n_ngb);
   free(sys.ngb_loc);
   free(sys.ngb_list);
+  free(allgv_data.recvbuf);
+  free(allgv_data.sendbuf);
+  free(allgv_data.recvcounts);
+  free(allgv_data.displs);
 
   if (sys.my_rank == 0) {
     timer_stop("Total");

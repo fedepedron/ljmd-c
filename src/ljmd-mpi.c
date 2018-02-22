@@ -192,7 +192,7 @@ static void force_ngb(mdsys_t *sys)
       int jloc = sys->ngb_list[ingb + iloc*NGB_MAX];
       int j    = sys->my_atom_list[jloc];
 
-      if (iloc < jloc) continue;
+      if (iloc > jloc) continue;
       double rx    = pbc(sys->coordinates[i] -
                          sys->coordinates[j], 0.5*sys->box);
       double ry    = pbc(sys->coordinates[i + sys->all_atoms] -
@@ -210,9 +210,9 @@ static void force_ngb(mdsys_t *sys)
       sys->fx[iloc] += rx/r*ffac;
       sys->fy[iloc] += ry/r*ffac;
       sys->fz[iloc] += rz/r*ffac;
-      sys->fx[jloc] -= sys->fx[iloc];
-      sys->fy[jloc] -= sys->fy[iloc];
-      sys->fz[jloc] -= sys->fz[iloc];
+      sys->fx[jloc] -= rx/r*ffac;
+      sys->fy[jloc] -= ry/r*ffac;
+      sys->fz[jloc] -= rz/r*ffac;
     }
     // Iterates through all ghost atoms.
     for(int ingb = sys->ngb_loc[iloc]; ingb < sys->n_ngb[iloc]; ingb++) {
@@ -590,7 +590,7 @@ int main(int argc, char **argv)
   azzero(sys.fx, sys.my_atoms);
   azzero(sys.fy, sys.my_atoms);
   azzero(sys.fz, sys.my_atoms);
-  azzero_i(sys.ngb_list, sys.my_atoms*sys.all_atoms);
+  azzero_i(sys.ngb_list, sys.my_atoms*NGB_MAX);
 
   // Creates datatypes for MPI_AllgatherV
   allgv_t allgv_data;
@@ -631,7 +631,6 @@ int main(int argc, char **argv)
                    MPI_COMM_WORLD);
         output(&sys, erg, traj, trajfile);
         timer_pause("Output Writing");
-        timer_start("Verlet Propagation");
       } else {
         MPI_Reduce((void*) &sys.epot, (void*) &sys.epot, 1, MPI_DOUBLE, MPI_SUM, 0,
                    MPI_COMM_WORLD);
@@ -639,6 +638,7 @@ int main(int argc, char **argv)
                    MPI_COMM_WORLD);
       }
     }
+    if (sys.my_rank == 0) timer_start("Verlet Propagation");
     velverlet(&sys, &allgv_data);
 
     if (sys.my_rank == 0) {
@@ -646,13 +646,12 @@ int main(int argc, char **argv)
      timer_start("Energy Calculation");
     }
     ekin(&sys);
-
     if (sys.my_rank == 0)  timer_pause("Energy Calculation");
 
   }
 
   /* clean up: close files, free memory */
-  printf("Simulation Done. Rank: %d.\n", sys.my_rank);
+  if (sys.my_rank == 0) printf("Simulation Done.\n");
 
   free(sys.my_atom_list);
   free(sys.ghost_atom_list);
@@ -675,7 +674,7 @@ int main(int argc, char **argv)
     timer_stop("Total");
     print_timers();
     fclose(erg);
-    fclose(traj);
+    //fclose(traj);
   }
   MPI_Finalize();
 }
